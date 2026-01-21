@@ -1,0 +1,12 @@
+# Render.com deployment configuration
+# https://render.com/docs/deploy-python-web-service
+
+services:
+  - type: web
+    name: antigravity-remote
+    env: python
+    buildCommand: pip install -r server/requirements.txt
+    startCommand: cd server && python main.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false  # You'll set this in Render dashboard
