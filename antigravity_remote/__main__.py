@@ -1,4 +1,4 @@
-"""CLI entry point for Antigravity Remote (Local Agent)."""
+"""CLI entry point for Antigravity Remote (Secure Version)."""
 
 import argparse
 import asyncio
@@ -6,97 +6,66 @@ import logging
 import sys
 
 from .agent import run_agent
-from .secrets import get_user_id, save_user_id, clear_user_id, get_user_config_path
+from .secrets import get_user_config, save_user_config, clear_user_config, get_user_config_path
 
 
 def setup_logging(verbose: bool = False) -> None:
-    """Configure logging."""
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        level=level
-    )
+    logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=level)
 
 
 def register_user() -> None:
-    """Interactive user registration flow."""
-    print("🔑 Antigravity Remote - User Registration")
+    """Secure user registration."""
+    print("� Antigravity Remote - Secure Registration")
     print()
-    print("To get your Telegram User ID:")
-    print("1. Open Telegram and message @userinfobot")
-    print("2. It will reply with your user ID")
+    print("To get your credentials:")
+    print("1. Open Telegram and message @antigravityrcbot")
+    print("2. Send /start - you'll see your ID and Auth Token")
     print()
     
     user_id = input("Enter your Telegram User ID: ").strip()
-    
     if not user_id.isdigit():
         print("❌ Invalid user ID. It should be a number.")
         sys.exit(1)
     
-    save_user_id(user_id)
-    print(f"✅ Registered! Your user ID: {user_id}")
+    auth_token = input("Enter your Auth Token: ").strip()
+    if len(auth_token) != 32:
+        print("❌ Invalid auth token. Should be 32 characters.")
+        sys.exit(1)
+    
+    save_user_config(user_id, auth_token)
+    print(f"✅ Registered securely!")
     print(f"   Config saved to: {get_user_config_path()}")
     print()
     print("Now run: antigravity-remote")
 
 
 def show_status() -> None:
-    """Show current registration status."""
-    user_id = get_user_id()
-    
+    config = get_user_config()
     print("📊 Antigravity Remote - Status")
     print()
-    
-    if user_id:
-        print(f"✅ Registered User ID: {user_id}")
+    if config:
+        print(f"✅ User ID: {config['user_id']}")
+        print(f"🔑 Auth Token: {config['auth_token'][:8]}...")
     else:
         print("❌ Not registered. Run: antigravity-remote --register")
-    
-    print(f"📁 Config directory: {get_user_config_path()}")
+    print(f"📁 Config: {get_user_config_path()}")
     print()
-    print("📱 Telegram Bot: @antigravityrcbot")
-    print("🔗 https://t.me/antigravityrcbot")
+    print("📱 Bot: @antigravityrcbot")
 
 
 def main() -> None:
-    """Main entry point."""
-    parser = argparse.ArgumentParser(
-        description="Remote control your Antigravity AI assistant via Telegram"
-    )
+    parser = argparse.ArgumentParser(description="Secure remote control for Antigravity AI")
     
-    parser.add_argument(
-        "--register",
-        action="store_true",
-        help="Register your Telegram user ID"
-    )
-    parser.add_argument(
-        "--status",
-        action="store_true",
-        help="Show registration status"
-    )
-    parser.add_argument(
-        "--unregister",
-        action="store_true",
-        help="Remove your registration"
-    )
-    parser.add_argument(
-        "--server",
-        help="Custom server URL (default: wss://antigravity-remote.onrender.com/ws)"
-    )
-    parser.add_argument(
-        "-v", "--verbose",
-        action="store_true",
-        help="Enable verbose logging"
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version="antigravity-remote 2.0.0"
-    )
+    parser.add_argument("--register", action="store_true", help="Register your credentials")
+    parser.add_argument("--status", action="store_true", help="Show registration status")
+    parser.add_argument("--unregister", action="store_true", help="Remove your registration")
+    parser.add_argument("--server", help="Custom server URL")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
+    parser.add_argument("--version", action="version", version="antigravity-remote 3.0.0")
     
     args = parser.parse_args()
     
-    # Handle registration commands
     if args.register:
         register_user()
         return
@@ -106,22 +75,25 @@ def main() -> None:
         return
     
     if args.unregister:
-        clear_user_id()
-        print("✅ Unregistered. Your user ID has been removed.")
+        clear_user_config()
+        print("✅ Unregistered.")
         return
     
     setup_logging(args.verbose)
     
-    # Check registration
-    user_id = get_user_id()
-    if not user_id:
+    config = get_user_config()
+    if not config:
         print("❌ Not registered!")
         print()
         print("Run: antigravity-remote --register")
         sys.exit(1)
     
-    print("🚀 Antigravity Remote Control")
+    user_id = config["user_id"]
+    auth_token = config["auth_token"]
+    
+    print("� Antigravity Remote Control (Secure)")
     print(f"   User ID: {user_id}")
+    print(f"   Auth: {auth_token[:8]}...")
     print(f"   Bot: @antigravityrcbot")
     print()
     print("📱 Open Telegram and message @antigravityrcbot to control your PC!")
@@ -130,7 +102,7 @@ def main() -> None:
     print()
     
     try:
-        asyncio.run(run_agent(user_id, args.server))
+        asyncio.run(run_agent(user_id, auth_token, args.server))
     except KeyboardInterrupt:
         print("\n👋 Shutting down...")
         sys.exit(0)

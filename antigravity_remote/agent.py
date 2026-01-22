@@ -1,6 +1,6 @@
 """
-Local Agent for Antigravity Remote - FULL VERSION
-Handles all commands including watchdog
+Local Agent for Antigravity Remote - SECURE VERSION
+Handles authentication and all commands
 """
 
 import asyncio
@@ -10,6 +10,7 @@ import logging
 import os
 import time
 import hashlib
+import re
 
 import websockets
 
@@ -22,7 +23,7 @@ from .utils import (
     focus_antigravity,
 )
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 DEFAULT_SERVER_URL = os.environ.get("ANTIGRAVITY_SERVER", "wss://antigravity-remote.onrender.com/ws")
@@ -33,11 +34,20 @@ DONE_KEYWORDS = ["anything else", "let me know", "task complete", "done!", "succ
 ERROR_KEYWORDS = ["error:", "failed", "exception", "traceback", "cannot", "permission denied"]
 
 
+def sanitize_input(text: str, max_length: int = 4000) -> str:
+    """Sanitize input."""
+    if not text:
+        return ""
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    return text[:max_length]
+
+
 class LocalAgent:
-    """Local agent with full command support."""
+    """Secure local agent with authentication."""
     
-    def __init__(self, user_id: str, server_url: str = None):
+    def __init__(self, user_id: str, auth_token: str, server_url: str = None):
         self.user_id = user_id
+        self.auth_token = auth_token
         self.server_url = server_url or DEFAULT_SERVER_URL
         self.websocket = None
         self.running = False
@@ -48,17 +58,35 @@ class LocalAgent:
     
     async def connect(self):
         url = f"{self.server_url}/{self.user_id}"
-        logger.info(f"🔌 Connecting to {url}...")
+        logger.info(f"🔌 Connecting securely to server...")
+        
         try:
             self.websocket = await websockets.connect(url)
-            logger.info("✅ Connected to server!")
+            
+            # Send authentication
+            auth_msg = json.dumps({"auth_token": self.auth_token})
+            await self.websocket.send(auth_msg)
+            
+            # Wait for response
+            response = await asyncio.wait_for(self.websocket.recv(), timeout=10.0)
+            resp = json.loads(response)
+            
+            if "error" in resp:
+                logger.error(f"❌ Authentication failed: {resp['error']}")
+                return False
+            
+            logger.info("✅ Authenticated and connected!")
             return True
+            
+        except asyncio.TimeoutError:
+            logger.error("❌ Connection timeout")
+            return False
         except Exception as e:
             logger.error(f"❌ Connection failed: {e}")
             return False
     
     async def send_alert(self, alert_type: str, text: str, include_screenshot: bool = False):
-        """Send alert to server for Telegram notification."""
+        """Send alert to server."""
         if not self.websocket:
             return
         
@@ -73,7 +101,7 @@ class LocalAgent:
         
         try:
             await self.websocket.send(json.dumps(alert))
-        except:
+        except Exception:
             pass
     
     async def run_watchdog(self):
@@ -85,7 +113,6 @@ class LocalAgent:
             await asyncio.sleep(5)
             
             try:
-                # Take screenshot and get hash
                 path = take_screenshot()
                 if not path:
                     continue
@@ -94,14 +121,13 @@ class LocalAgent:
                     data = f.read()
                     current_hash = hashlib.md5(data[:10000]).hexdigest()
                 
-                # Check for idle (same screen)
                 if current_hash == self.last_screen_hash:
                     self.idle_count += 1
                 else:
                     self.idle_count = 0
                 self.last_screen_hash = current_hash
                 
-                # Try OCR if available
+                # Try OCR
                 try:
                     import pytesseract
                     from PIL import Image
@@ -109,8 +135,7 @@ class LocalAgent:
                     text = pytesseract.image_to_string(img).lower()
                     
                     current_time = time.time()
-                    if current_time - last_alert_time > 30:  # Cooldown
-                        # Check keywords
+                    if current_time - last_alert_time > 30:
                         for kw in APPROVAL_KEYWORDS:
                             if kw in text:
                                 await self.send_alert("approval", f"🚨 *Approval needed!*\nDetected: `{kw}`", True)
@@ -129,11 +154,10 @@ class LocalAgent:
                                 last_alert_time = current_time
                                 break
                 except ImportError:
-                    pass  # No OCR
+                    pass
                 
                 cleanup_screenshot(path)
                 
-                # Idle alert
                 if self.idle_count >= 3 and time.time() - last_alert_time > 60:
                     await self.send_alert("idle", "💤 *Screen idle*", True)
                     last_alert_time = time.time()
@@ -159,20 +183,16 @@ class LocalAgent:
                     result["success"] = True
             
             elif cmd_type == "relay":
-                text = command.get("text", "")
+                text = sanitize_input(command.get("text", ""))
                 result["success"] = send_to_antigravity(text)
             
             elif cmd_type == "scroll":
                 direction = command.get("direction", "down")
-                clicks = 25 if direction == "up" else -25
-                if direction == "top":
-                    clicks = 500
-                elif direction == "bottom":
-                    clicks = -500
+                clicks = {"up": 25, "down": -25, "top": 500, "bottom": -500}.get(direction, -25)
                 result["success"] = scroll_screen(clicks)
             
             elif cmd_type == "key":
-                combo = command.get("combo", "").split("+")
+                combo = sanitize_input(command.get("combo", ""), 50).split("+")
                 result["success"] = send_key_combo(combo)
             
             elif cmd_type == "accept":
@@ -204,7 +224,7 @@ class LocalAgent:
             elif cmd_type == "model":
                 import pyautogui
                 import pyperclip
-                model = command.get("model", "")
+                model = sanitize_input(command.get("model", ""), 100)
                 focus_antigravity()
                 time.sleep(0.2)
                 pyautogui.hotkey('ctrl', 'shift', 'p')
@@ -238,7 +258,6 @@ class LocalAgent:
                 result["success"] = True
             
             elif cmd_type == "files":
-                import os
                 workspace = os.getcwd()
                 items = os.listdir(workspace)[:20]
                 result["files"] = "\n".join(f"📄 {i}" for i in items)
@@ -249,7 +268,7 @@ class LocalAgent:
                 
         except Exception as e:
             logger.error(f"Command error: {e}")
-            result["error"] = str(e)
+            result["error"] = "Command failed"
         
         return result
     
@@ -260,6 +279,7 @@ class LocalAgent:
         while self.running:
             try:
                 if not await self.connect():
+                    logger.info(f"Retrying in {reconnect_delay}s...")
                     await asyncio.sleep(reconnect_delay)
                     continue
                 
@@ -286,6 +306,7 @@ class LocalAgent:
             asyncio.create_task(self.websocket.close())
 
 
-async def run_agent(user_id: str, server_url: str = None):
-    agent = LocalAgent(user_id, server_url)
+async def run_agent(user_id: str, auth_token: str, server_url: str = None):
+    """Run the secure local agent."""
+    agent = LocalAgent(user_id, auth_token, server_url)
     await agent.run()
