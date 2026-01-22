@@ -1,19 +1,13 @@
-"""
-Antigravity Remote - Control your Antigravity AI assistant via Telegram.
+"""Antigravity Remote - Secure remote control via Telegram."""
 
-Usage:
-    pip install antigravity-remote
-    antigravity-remote --token YOUR_TOKEN --user-id YOUR_ID
-    
-Or use environment variables:
-    export TELEGRAM_BOT_TOKEN=your_token
-    export TELEGRAM_USER_ID=your_id
-    antigravity-remote
-"""
+__version__ = "3.0.0"
 
-from .bot import AntigravityBot
-from .config import Config, config
-from .state import BotState, state
+from .agent import LocalAgent, run_agent
+from .secrets import get_user_config, save_user_config
 
-__version__ = "1.0.0"
-__all__ = ["AntigravityBot", "Config", "config", "BotState", "state"]
+__all__ = [
+    "LocalAgent",
+    "run_agent",
+    "get_user_config",
+    "save_user_config",
+]
