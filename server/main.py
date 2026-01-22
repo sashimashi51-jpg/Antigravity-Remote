@@ -128,21 +128,15 @@ class AuditLogger:
 
 
 def generate_auth_token(user_id: str) -> str:
-    """Generate secure auth token for user."""
-    data = f"{user_id}:{AUTH_SECRET}:{int(time.time())}"
+    """Generate stable auth token for user (doesn't change)."""
+    data = f"{user_id}:{AUTH_SECRET}"
     return hashlib.sha256(data.encode()).hexdigest()[:32]
 
 
 def validate_auth_token(user_id: str, token: str) -> bool:
-    """Validate auth token (simplified - accepts recent tokens)."""
-    # Accept tokens generated in last 30 days
-    for days_ago in range(30):
-        ts = int(time.time()) - (days_ago * 86400)
-        data = f"{user_id}:{AUTH_SECRET}:{ts}"
-        expected = hashlib.sha256(data.encode()).hexdigest()[:32]
-        if secrets.compare_digest(token, expected):
-            return True
-    return False
+    """Validate auth token."""
+    expected = generate_auth_token(user_id)
+    return secrets.compare_digest(token, expected)
 
 
 def sanitize_input(text: str, max_length: int = 4000) -> str:
