@@ -30,13 +30,11 @@ logger.info(f"BOT_TOKEN set: {'Yes' if BOT_TOKEN else 'NO - MISSING!'}")
 if not BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN is NOT SET!")
     logger.error("Set it in Render Environment Variables")
-    # Don't exit - let the API server run for health checks
-    # sys.exit(1)
 
 try:
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-    from telegram import Update
-    from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
     from telegram.constants import ParseMode
     import uvicorn
     import base64
@@ -114,14 +112,23 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     status = "🟢 Connected" if uid in connected_clients else "🔴 Not connected"
     await update.message.reply_text(
-        f"🚀 *Antigravity Remote*\n\nID: `{uid}`\nStatus: {status}",
+        f"🚀 *Antigravity Remote*\n\n"
+        f"ID: `{uid}`\nStatus: {status}\n\n"
+        f"*Commands:*\n"
+        f"/status - Screenshot\n"
+        f"/scroll up|down - Scroll\n"
+        f"/accept - Accept (Alt+Enter)\n"
+        f"/reject - Reject (Escape)\n"
+        f"/key ctrl+s - Key combo\n"
+        f"/quick - Quick buttons\n"
+        f"Or just type a message!",
         parse_mode=ParseMode.MARKDOWN
     )
 
 async def status_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     if uid not in connected_clients:
-        await update.message.reply_text("🔴 Not connected")
+        await update.message.reply_text(f"🔴 Not connected\n\nID: `{uid}`", parse_mode=ParseMode.MARKDOWN)
         return
     msg = await update.message.reply_text("📸 Capturing...")
     resp = await send_cmd(uid, {"type": "screenshot"})
@@ -131,6 +138,85 @@ async def status_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         await msg.edit_text("❌ Failed")
 
+async def scroll_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if uid not in connected_clients:
+        await update.message.reply_text("🔴 Not connected")
+        return
+    
+    args = ctx.args
+    direction = "down"
+    if args and args[0].lower() in ["up", "down", "top", "bottom"]:
+        direction = args[0].lower()
+    
+    resp = await send_cmd(uid, {"type": "scroll", "direction": direction})
+    await update.message.reply_text(f"📜 Scrolled {direction}" if resp else "❌ Failed")
+
+async def accept_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if uid not in connected_clients:
+        await update.message.reply_text("🔴 Not connected")
+        return
+    resp = await send_cmd(uid, {"type": "accept"})
+    await update.message.reply_text("✅ Accept sent" if resp else "❌ Failed")
+
+async def reject_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if uid not in connected_clients:
+        await update.message.reply_text("🔴 Not connected")
+        return
+    resp = await send_cmd(uid, {"type": "reject"})
+    await update.message.reply_text("❌ Reject sent" if resp else "❌ Failed")
+
+async def key_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if uid not in connected_clients:
+        await update.message.reply_text("🔴 Not connected")
+        return
+    
+    args = ctx.args
+    if not args:
+        await update.message.reply_text("Usage: /key ctrl+s")
+        return
+    
+    combo = args[0]
+    resp = await send_cmd(uid, {"type": "key", "combo": combo})
+    await update.message.reply_text(f"⌨️ Sent: `{combo}`" if resp else "❌ Failed", parse_mode=ParseMode.MARKDOWN)
+
+async def quick_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("✅ Yes", callback_data="quick_yes"),
+         InlineKeyboardButton("❌ No", callback_data="quick_no")],
+        [InlineKeyboardButton("▶️ Proceed", callback_data="quick_proceed"),
+         InlineKeyboardButton("⏹️ Cancel", callback_data="quick_cancel")],
+        [InlineKeyboardButton("📸 Screenshot", callback_data="quick_screenshot")],
+    ]
+    await update.message.reply_text(
+        "⚡ *Quick Actions:*",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    uid = str(update.effective_user.id)
+    if uid not in connected_clients:
+        await query.message.reply_text("🔴 Not connected")
+        return
+    
+    data = query.data
+    
+    if data == "quick_screenshot":
+        resp = await send_cmd(uid, {"type": "screenshot"})
+        if resp and resp.get("image"):
+            await ctx.bot.send_photo(chat_id=update.effective_chat.id, photo=base64.b64decode(resp["image"]))
+    else:
+        text = data.replace("quick_", "").capitalize()
+        resp = await send_cmd(uid, {"type": "relay", "text": text})
+        await query.message.reply_text(f"📤 Sent: {text}" if resp else "❌ Failed")
+
 async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     if uid not in connected_clients:
@@ -138,7 +224,11 @@ async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     msg = await update.message.reply_text("📤 Sending...")
     resp = await send_cmd(uid, {"type": "relay", "text": update.message.text})
-    await msg.edit_text("✅ Sent!" if resp and resp.get("success") else "❌ Failed")
+    if resp and resp.get("success"):
+        keyboard = [[InlineKeyboardButton("📸 Screenshot", callback_data="quick_screenshot")]]
+        await msg.edit_text("✅ Sent!", reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await msg.edit_text("❌ Failed")
 
 def run_api():
     logger.info(f"Starting API on port {PORT}...")
@@ -153,8 +243,16 @@ async def run_bot():
     
     logger.info("Starting Telegram bot...")
     application = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    # Add all handlers
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("status", status_cmd))
+    application.add_handler(CommandHandler("scroll", scroll_cmd))
+    application.add_handler(CommandHandler("accept", accept_cmd))
+    application.add_handler(CommandHandler("reject", reject_cmd))
+    application.add_handler(CommandHandler("key", key_cmd))
+    application.add_handler(CommandHandler("quick", quick_cmd))
+    application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_msg))
     
     await application.initialize()
@@ -167,12 +265,9 @@ async def run_bot():
 
 async def main():
     logger.info("Starting main...")
-    # API in background thread
     api_thread = threading.Thread(target=run_api, daemon=True)
     api_thread.start()
     logger.info("API thread started")
-    
-    # Bot in main loop
     await run_bot()
 
 if __name__ == "__main__":
