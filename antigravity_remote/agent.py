@@ -342,6 +342,18 @@ class LocalAgent:
         
         return result
     
+    async def send_heartbeat(self):
+        """Send periodic heartbeat pings to server."""
+        while self.running and self.websocket:
+            try:
+                await asyncio.sleep(30)  # Every 30 seconds
+                if self.websocket:
+                    await self.websocket.send(json.dumps({"type": "ping"}))
+                    logger.debug("💓 Heartbeat sent")
+            except Exception as e:
+                logger.debug(f"Heartbeat error (will reconnect): {e}")
+                break
+    
     async def run(self):
         self.running = True
         reconnect_delay = 5
@@ -355,11 +367,24 @@ class LocalAgent:
                 
                 reconnect_delay = 5
                 
-                async for message in self.websocket:
-                    command = json.loads(message)
-                    logger.info(f"📥 Received: {command.get('type')}")
-                    result = await self.handle_command(command)
-                    await self.websocket.send(json.dumps(result))
+                # Start heartbeat task
+                heartbeat_task = asyncio.create_task(self.send_heartbeat())
+                
+                try:
+                    async for message in self.websocket:
+                        command = json.loads(message)
+                        cmd_type = command.get('type')
+                        
+                        # Handle pong (response to our ping)
+                        if cmd_type == "pong":
+                            logger.debug("💓 Heartbeat acknowledged")
+                            continue
+                        
+                        logger.info(f"📥 Received: {cmd_type}")
+                        result = await self.handle_command(command)
+                        await self.websocket.send(json.dumps(result))
+                finally:
+                    heartbeat_task.cancel()
                     
             except websockets.exceptions.ConnectionClosed:
                 logger.warning("Connection closed. Reconnecting...")
