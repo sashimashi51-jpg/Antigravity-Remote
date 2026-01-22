@@ -1,12 +1,7 @@
-# Render.com deployment configuration
-# https://render.com/docs/deploy-python-web-service
+# Render.com deployment - use these settings
 
-services:
-  - type: web
-    name: antigravity-remote
-    env: python
-    buildCommand: pip install -r server/requirements.txt
-    startCommand: cd server && python main.py
-    envVars:
-      - key: TELEGRAM_BOT_TOKEN
-        sync: false  # You'll set this in Render dashboard
+# Build Command: pip install -r server/requirements.txt
+# Start Command: cd server && python main.py
+
+# Environment Variables:
+# TELEGRAM_BOT_TOKEN = 8587495609:AAHuNtyBPYU3OnYLOr-MDuuFFlVUznL6ncs
