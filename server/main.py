@@ -565,9 +565,71 @@ async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     resp = await send_cmd(uid, {"type": "relay", "text": text})
     if resp and resp.get("success"):
         keyboard = [[InlineKeyboardButton("📸 Screenshot", callback_data="q_ss")]]
-        await msg.edit_text("✅ Sent!", reply_markup=InlineKeyboardMarkup(keyboard))
+        try:
+            await msg.edit_text("✅ Sent!", reply_markup=InlineKeyboardMarkup(keyboard))
+        except:
+            pass
     else:
         await msg.edit_text("❌ Failed")
+
+async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await check_rate_limit(update): return
+    uid = str(update.effective_user.id)
+    if uid not in connected_clients:
+        await update.message.reply_text("🔴 Not connected")
+        return
+    
+    msg = await update.message.reply_text("👁️ Processing photo...")
+    photo_file = await update.message.photo[-1].get_file()
+    data = await photo_file.download_as_bytearray()
+    b64_data = base64.b64encode(data).decode()
+    
+    resp = await send_cmd(uid, {"type": "photo", "data": b64_data})
+    if resp and resp.get("success"):
+        await msg.edit_text("✅ Photo sent to Agent")
+    else:
+        await msg.edit_text("❌ Failed to send photo")
+
+async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await check_rate_limit(update): return
+    uid = str(update.effective_user.id)
+    if uid not in connected_clients:
+        await update.message.reply_text("🔴 Not connected")
+        return
+
+    msg = await update.message.reply_text("🎙️ Processing voice...")
+    voice_file = await update.message.voice.get_file()
+    data = await voice_file.download_as_bytearray()
+    b64_data = base64.b64encode(data).decode()
+    
+    resp = await send_cmd(uid, {"type": "voice", "data": b64_data, "format": "ogg"})
+    if resp and resp.get("success"):
+        await msg.edit_text(f"✅ Voice command sent: \"{resp.get('text', 'Audio sent')}\"")
+    else:
+        await msg.edit_text("❌ Failed to process voice")
+
+async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await check_rate_limit(update): return
+    uid = str(update.effective_user.id)
+    if uid not in connected_clients:
+        await update.message.reply_text("🔴 Not connected")
+        return
+
+    doc = update.message.document
+    if doc.file_size > 20 * 1024 * 1024:
+        await update.message.reply_text("❌ File too large (max 20MB)")
+        return
+
+    msg = await update.message.reply_text(f"📂 Sending {doc.file_name}...")
+    doc_file = await doc.get_file()
+    data = await doc_file.download_as_bytearray()
+    b64_data = base64.b64encode(data).decode()
+    
+    resp = await send_cmd(uid, {"type": "file", "data": b64_data, "name": doc.file_name})
+    if resp and resp.get("success"):
+        await msg.edit_text(f"✅ Saved to: {resp.get('path', 'disk')}")
+    else:
+        await msg.edit_text("❌ Failed to send file")
 
 # ============ Main ============
 
@@ -597,6 +659,9 @@ async def run_bot():
     
     bot_application.add_handler(CallbackQueryHandler(button_handler))
     bot_application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_msg))
+    bot_application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    bot_application.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    bot_application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
     await bot_application.initialize()
     await bot_application.start()

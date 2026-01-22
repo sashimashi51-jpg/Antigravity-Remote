@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "antigravity-remote"
-version = "3.0.0"
+version = "3.1.0"
 description = "Remote control your Antigravity AI assistant via Telegram"
 readme = "README.md"
 license = "MIT"
@@ -26,12 +26,16 @@ classifiers = [
 ]
 
 dependencies = [
-    "websockets>=12.0",
+    "websockets>=10.0",
+    "python-telegram-bot>=20.0",
     "mss>=9.0.0",
-    "pyautogui>=0.9.54",
+    "pyautogui>=0.9.53",
     "pygetwindow>=0.0.9",
-    "psutil>=5.9.0",
-    "pyperclip>=1.8.0",
+    "fastapi>=0.95.0",
+    "uvicorn>=0.21.0",
+    "pyperclip>=1.8.2",
+    "SpeechRecognition>=3.10.0",
+    "pydub>=0.25.1",
     "Pillow>=10.0.0",
 ]
 

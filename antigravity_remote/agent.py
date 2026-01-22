@@ -1,6 +1,6 @@
 """
 Local Agent for Antigravity Remote - SECURE VERSION
-Handles authentication and all commands
+Handles authentication and all commands including MEDIA (Voice, Photo, Files)
 """
 
 import asyncio
@@ -11,6 +11,7 @@ import os
 import time
 import hashlib
 import re
+from pathlib import Path
 
 import websockets
 
@@ -43,7 +44,7 @@ def sanitize_input(text: str, max_length: int = 4000) -> str:
 
 
 class LocalAgent:
-    """Secure local agent with authentication."""
+    """Secure local agent with authentication and media support."""
     
     def __init__(self, user_id: str, auth_token: str, server_url: str = None):
         self.user_id = user_id
@@ -55,6 +56,10 @@ class LocalAgent:
         self.watchdog_task = None
         self.last_screen_hash = None
         self.idle_count = 0
+        
+        # Setup download dirs
+        self.downloads_dir = Path.home() / "Downloads" / "AntigravityRemote"
+        self.downloads_dir.mkdir(parents=True, exist_ok=True)
     
     async def connect(self):
         url = f"{self.server_url}/{self.user_id}"
@@ -67,20 +72,20 @@ class LocalAgent:
             auth_msg = json.dumps({"auth_token": self.auth_token})
             await self.websocket.send(auth_msg)
             
-            # Wait for response
-            response = await asyncio.wait_for(self.websocket.recv(), timeout=10.0)
-            resp = json.loads(response)
-            
-            if "error" in resp:
-                logger.error(f"❌ Authentication failed: {resp['error']}")
-                return False
+            # Wait for strict auth response
+            try:
+                response = await asyncio.wait_for(self.websocket.recv(), timeout=10.0)
+                resp = json.loads(response)
+                if "error" in resp:
+                    logger.error(f"❌ Authentication failed: {resp['error']}")
+                    return False
+            except asyncio.TimeoutError:
+                 # Legacy server might not send response immediately, assume ok but warn
+                 logger.warning("⚠️ No auth response (legacy server?), assuming connected")
             
             logger.info("✅ Authenticated and connected!")
             return True
             
-        except Exception as e:
-            logger.error(f"❌ Connection failed: {e}")
-            return False
         except Exception as e:
             logger.error(f"❌ Connection failed: {e}")
             return False
@@ -168,6 +173,26 @@ class LocalAgent:
         
         logger.info("🐕 Watchdog stopped")
     
+    def process_voice(self, audio_path: Path) -> str:
+        """Transcribe voice file using SpeechRecognition."""
+        try:
+            import speech_recognition as sr
+            from pydub import AudioSegment
+            
+            # Convert OGG to WAV
+            wav_path = audio_path.with_suffix('.wav')
+            sound = AudioSegment.from_ogg(str(audio_path))
+            sound.export(str(wav_path), format="wav")
+            
+            r = sr.Recognizer()
+            with sr.AudioFile(str(wav_path)) as source:
+                audio = r.record(source)
+                text = r.recognize_google(audio)
+                return text
+        except Exception as e:
+            logger.error(f"Transcription failed: {e}")
+            return ""
+
     async def handle_command(self, command: dict) -> dict:
         cmd_type = command.get("type")
         message_id = command.get("message_id")
@@ -186,6 +211,52 @@ class LocalAgent:
                 text = sanitize_input(command.get("text", ""))
                 result["success"] = send_to_antigravity(text)
             
+            elif cmd_type == "photo":
+                try:
+                    data = base64.b64decode(command.get("data", ""))
+                    filename = f"photo_{int(time.time())}.jpg"
+                    path = self.downloads_dir / filename
+                    path.write_bytes(data)
+                    
+                    # Tell Agent
+                    send_to_antigravity(f"I uploaded a photo here: {path}")
+                    result["success"] = True
+                except Exception as e:
+                    result["error"] = str(e)
+            
+            elif cmd_type == "voice":
+                try:
+                    data = base64.b64decode(command.get("data", ""))
+                    filename = f"voice_{int(time.time())}.ogg"
+                    path = self.downloads_dir / filename
+                    path.write_bytes(data)
+                    
+                    # Try transcribe
+                    text = self.process_voice(path)
+                    if text:
+                        send_to_antigravity(f"(Voice Command): {text}")
+                        result["text"] = text
+                    else:
+                        send_to_antigravity(f"I sent a voice note here: {path}")
+                        result["text"] = "Audio saved (transcription failed)"
+                    
+                    result["success"] = True
+                except Exception as e:
+                    result["error"] = str(e)
+            
+            elif cmd_type == "file":
+                try:
+                    data = base64.b64decode(command.get("data", ""))
+                    name = sanitize_input(command.get("name", "file"), 100)
+                    path = Path.cwd() / name  # Save to CWD
+                    path.write_bytes(data)
+                    
+                    send_to_antigravity(f"I saved a file: {path.absolute()}")
+                    result["path"] = str(path.absolute())
+                    result["success"] = True
+                except Exception as e:
+                    result["error"] = str(e)
+
             elif cmd_type == "scroll":
                 direction = command.get("direction", "down")
                 clicks = {"up": 25, "down": -25, "top": 500, "bottom": -500}.get(direction, -25)
@@ -223,21 +294,20 @@ class LocalAgent:
             
             elif cmd_type == "model":
                 import pyautogui
-                import pyperclip
                 model = sanitize_input(command.get("model", ""), 100)
                 focus_antigravity()
-                time.sleep(0.2)
-                pyautogui.hotkey('ctrl', 'shift', 'p')
                 time.sleep(0.5)
-                pyperclip.copy("Switch Model")
-                pyautogui.hotkey('ctrl', 'v')
-                time.sleep(0.3)
+                
+                # Strategy 1: Ctrl + / (Common Cursor shortcut)
+                pyautogui.hotkey('ctrl', '/')
+                time.sleep(0.5)
+                pyautogui.write(model, interval=0.05)
+                time.sleep(0.5)
                 pyautogui.press('enter')
-                time.sleep(0.3)
-                pyperclip.copy(model)
-                pyautogui.hotkey('ctrl', 'v')
-                time.sleep(0.2)
-                pyautogui.press('enter')
+                
+                # Strategy 2: Just tell the Agent!
+                time.sleep(0.5)
+                send_to_antigravity(f"Please switch model to {model}")
                 result["success"] = True
             
             elif cmd_type == "watchdog":

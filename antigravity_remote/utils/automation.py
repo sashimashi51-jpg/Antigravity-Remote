@@ -24,7 +24,7 @@ def focus_antigravity() -> bool:
     """
     try:
         # Try different window titles in priority order
-        window_titles = ['Antigravity', 'Visual Studio Code', 'Cursor']
+        window_titles = ['Antigravity IDE', 'Antigravity', 'Visual Studio Code', 'Cursor']
         
         for title in window_titles:
             windows = gw.getWindowsWithTitle(title)
