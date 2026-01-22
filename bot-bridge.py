@@ -196,7 +196,7 @@ async def scroll_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     base_clicks = 25
     clicks = base_clicks * multiplier
     if direction == "down":
-        clicks = -clicks  # Negative = scroll down (to latest)
+            clicks = -clicks  # Negative = scroll down (to latest)
     
     def do_scroll():
         focus_antigravity()

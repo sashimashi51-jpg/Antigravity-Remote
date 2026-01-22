@@ -126,17 +126,48 @@ class AuditLogger:
             self.logs = self.logs[-self.max_entries:]
         logger.info(f"AUDIT: {entry['user_id']} - {action}")
 
+TOKEN_EXPIRY_DAYS = 30
 
-def generate_auth_token(user_id: str) -> str:
-    """Generate stable auth token for user (doesn't change)."""
-    data = f"{user_id}:{AUTH_SECRET}"
-    return hashlib.sha256(data.encode()).hexdigest()[:32]
+
+def generate_auth_token(user_id: str) -> tuple[str, int]:
+    """
+    Generate auth token with expiry timestamp.
+    Returns (token, expires_at_timestamp).
+    Token format: HMAC of user_id:secret:issue_time
+    """
+    issue_time = int(time.time())
+    expires_at = issue_time + (TOKEN_EXPIRY_DAYS * 86400)
+    
+    data = f"{user_id}:{AUTH_SECRET}:{issue_time}"
+    token = hashlib.sha256(data.encode()).hexdigest()[:32]
+    
+    return token, expires_at
 
 
 def validate_auth_token(user_id: str, token: str) -> bool:
-    """Validate auth token."""
-    expected = generate_auth_token(user_id)
-    return secrets.compare_digest(token, expected)
+    """
+    Validate auth token.
+    Accepts tokens issued within the last TOKEN_EXPIRY_DAYS days.
+    """
+    current_time = int(time.time())
+    
+    # Check tokens from the last 30 days (86400 seconds per day)
+    for days_ago in range(TOKEN_EXPIRY_DAYS + 1):
+        # Check multiple issue times per day (every hour) for better coverage
+        for hour in range(0, 24, 6):  # Check 4 times per day
+            test_time = current_time - (days_ago * 86400) - (hour * 3600)
+            data = f"{user_id}:{AUTH_SECRET}:{test_time}"
+            expected = hashlib.sha256(data.encode()).hexdigest()[:32]
+            if secrets.compare_digest(token, expected):
+                return True
+    
+    # Also accept legacy static tokens for backwards compatibility
+    legacy_data = f"{user_id}:{AUTH_SECRET}"
+    legacy_token = hashlib.sha256(legacy_data.encode()).hexdigest()[:32]
+    if secrets.compare_digest(token, legacy_token):
+        return True
+    
+    return False
 
 
 def sanitize_input(text: str, max_length: int = 4000) -> str:
@@ -304,8 +335,9 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     status = "🟢 Connected" if uid in connected_clients else "🔴 Not connected"
     
-    # Generate auth token for user
-    auth_token = generate_auth_token(uid)
+    # Generate auth token for user (with expiry)
+    auth_token, expires_at = generate_auth_token(uid)
+    expiry_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d")
     
     audit_logger.log(uid, "START")
     
@@ -313,7 +345,8 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🔐 *Antigravity Remote (Secure)*\n\n"
         f"ID: `{uid}`\n"
         f"Status: {status}\n"
-        f"Auth Token: `{auth_token}`\n\n"
+        f"Auth Token: `{auth_token}`\n"
+        f"Expires: {expiry_date}\n\n"
         f"*Setup:*\n"
         f"`pip install antigravity-remote`\n"
         f"`antigravity-remote --register`\n"
