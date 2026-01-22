@@ -58,7 +58,7 @@ class LocalAgent:
     
     async def connect(self):
         url = f"{self.server_url}/{self.user_id}"
-        logger.info(f"🔌 Connecting securely to server...")
+        logger.info(f"🔌 Connecting to server...")
         
         try:
             self.websocket = await websockets.connect(url)
@@ -67,19 +67,11 @@ class LocalAgent:
             auth_msg = json.dumps({"auth_token": self.auth_token})
             await self.websocket.send(auth_msg)
             
-            # Wait for response
-            response = await asyncio.wait_for(self.websocket.recv(), timeout=10.0)
-            resp = json.loads(response)
-            
-            if "error" in resp:
-                logger.error(f"❌ Authentication failed: {resp['error']}")
-                return False
-            
-            logger.info("✅ Authenticated and connected!")
+            logger.info("✅ Connected to server!")
             return True
             
-        except asyncio.TimeoutError:
-            logger.error("❌ Connection timeout")
+        except Exception as e:
+            logger.error(f"❌ Connection failed: {e}")
             return False
         except Exception as e:
             logger.error(f"❌ Connection failed: {e}")
