@@ -192,17 +192,22 @@ async def health():
 async def websocket_endpoint(websocket: WebSocket, user_id: str):
     await websocket.accept()
     
-    # Wait for auth message (accept any token for now)
+    # Wait for auth message
     try:
         auth_data = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
         auth = json.loads(auth_data)
         auth_token = auth.get("auth_token", "")
         
-        # Log connection (auth validation temporarily relaxed)
-        if auth_token:
-            audit_logger.log(user_id, "CONNECTED")
-        else:
-            audit_logger.log(user_id, "CONNECTED_NO_TOKEN")
+        # Validate
+        if not validate_auth_token(user_id, auth_token):
+            audit_logger.log(user_id, "AUTH_FAILED", "Invalid token")
+            await websocket.send_text(json.dumps({"error": "Authentication failed"}))
+            await websocket.close(code=4001)
+            return
+        
+        # Send success response
+        await websocket.send_text(json.dumps({"status": "authenticated"}))
+        audit_logger.log(user_id, "CONNECTED")
         
     except asyncio.TimeoutError:
         await websocket.close(code=4002)

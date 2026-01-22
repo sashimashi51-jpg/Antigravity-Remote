@@ -67,7 +67,15 @@ class LocalAgent:
             auth_msg = json.dumps({"auth_token": self.auth_token})
             await self.websocket.send(auth_msg)
             
-            logger.info("✅ Connected to server!")
+            # Wait for response
+            response = await asyncio.wait_for(self.websocket.recv(), timeout=10.0)
+            resp = json.loads(response)
+            
+            if "error" in resp:
+                logger.error(f"❌ Authentication failed: {resp['error']}")
+                return False
+            
+            logger.info("✅ Authenticated and connected!")
             return True
             
         except Exception as e:
