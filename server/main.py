@@ -1,8 +1,10 @@
 """
-Antigravity Remote Server - v4.0.0 VIBECODER EDITION
+Antigravity Remote Server - v4.1.0 VIBECODER EDITION
 Features: Live Stream, Two-Way Chat, Code Preview, Scheduled Tasks, 
           Smart Notifs, Mini Keyboard, Voice Response, Better Screenshots,
           Progress Bar, Undo Stack
+          
+v4.1.0: SQLite persistence for scheduled tasks, command queue, and audit logs
 """
 
 import asyncio
@@ -27,7 +29,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 logger.info("=" * 50)
-logger.info("Antigravity Remote Server - v4.0.0 VIBECODER EDITION")
+logger.info("Antigravity Remote Server - v4.1.0 VIBECODER EDITION")
+logger.info("Features: SQLite Persistence, Live Stream, Two-Way Chat")
 logger.info("=" * 50)
 
 # ============ Configuration ============
@@ -60,6 +63,22 @@ try:
     from telegram.constants import ParseMode
     import uvicorn
     import httpx
+    
+    # Import database layer for persistence
+    try:
+        from db import (
+            ScheduledTasksRepository,
+            CommandQueueRepository,
+            AuditLogRepository,
+            UserSessionRepository,
+            init_database
+        )
+        PERSISTENCE_ENABLED = True
+        logger.info("SQLite persistence enabled!")
+    except ImportError:
+        PERSISTENCE_ENABLED = False
+        logger.warning("SQLite persistence disabled (db module not found)")
+    
     logger.info("All imports successful!")
 except Exception as e:
     logger.error(f"Import error: {e}")
@@ -143,40 +162,50 @@ class HeartbeatService:
 
 
 class SchedulerService:
-    """Scheduled tasks service."""
+    """Scheduled tasks service with SQLite persistence."""
     def __init__(self):
-        self.tasks: Dict[str, List[dict]] = defaultdict(list)
+        # Fallback in-memory storage if persistence disabled
+        self._memory_tasks: Dict[str, List[dict]] = defaultdict(list)
     
     def add_task(self, user_id: str, time_str: str, command: str) -> bool:
         """Add scheduled task. time_str format: '9:00' or '14:30'"""
         try:
             hour, minute = map(int, time_str.split(':'))
-            self.tasks[user_id].append({
-                "hour": hour,
-                "minute": minute,
-                "command": command,
-                "last_run": None
-            })
-            return True
+            if PERSISTENCE_ENABLED:
+                return ScheduledTasksRepository.add_task(user_id, hour, minute, command)
+            else:
+                self._memory_tasks[user_id].append({
+                    "hour": hour, "minute": minute, "command": command, "last_run": None
+                })
+                return True
         except:
             return False
     
     def get_due_tasks(self, user_id: str) -> List[str]:
         """Get tasks that are due now."""
         now = datetime.now()
-        due = []
-        for task in self.tasks.get(user_id, []):
-            if task["hour"] == now.hour and task["minute"] == now.minute:
-                if task["last_run"] != now.strftime("%Y-%m-%d %H:%M"):
-                    task["last_run"] = now.strftime("%Y-%m-%d %H:%M")
-                    due.append(task["command"])
-        return due
+        if PERSISTENCE_ENABLED:
+            tasks = ScheduledTasksRepository.get_due_tasks(user_id, now.hour, now.minute)
+            return [t['command'] for t in tasks]
+        else:
+            due = []
+            for task in self._memory_tasks.get(user_id, []):
+                if task["hour"] == now.hour and task["minute"] == now.minute:
+                    if task["last_run"] != now.strftime("%Y-%m-%d %H:%M"):
+                        task["last_run"] = now.strftime("%Y-%m-%d %H:%M")
+                        due.append(task["command"])
+            return due
     
     def list_tasks(self, user_id: str) -> List[dict]:
-        return self.tasks.get(user_id, [])
+        if PERSISTENCE_ENABLED:
+            return ScheduledTasksRepository.get_tasks(user_id)
+        return self._memory_tasks.get(user_id, [])
     
     def clear_tasks(self, user_id: str):
-        self.tasks[user_id] = []
+        if PERSISTENCE_ENABLED:
+            ScheduledTasksRepository.clear_tasks(user_id)
+        else:
+            self._memory_tasks[user_id] = []
 
 
 class UndoStackService:
@@ -239,20 +268,24 @@ class ProgressService:
 
 
 class AuditLoggerService:
+    """Audit logging with SQLite persistence."""
     def __init__(self, max_entries: int = 1000):
-        self.logs: list = []
+        self._memory_logs: list = []
         self.max_entries = max_entries
     
     def log(self, user_id: str, action: str, details: str = ""):
-        entry = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "user_id": user_id[-4:] if len(user_id) > 4 else "****",
-            "action": action,
-            "details": details[:100] if details else ""
-        }
-        self.logs.append(entry)
-        if len(self.logs) > self.max_entries:
-            self.logs = self.logs[-self.max_entries:]
+        if PERSISTENCE_ENABLED:
+            AuditLogRepository.log(user_id, action, details)
+        else:
+            entry = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "user_id": user_id[-4:] if len(user_id) > 4 else "****",
+                "action": action,
+                "details": details[:100] if details else ""
+            }
+            self._memory_logs.append(entry)
+            if len(self._memory_logs) > self.max_entries:
+                self._memory_logs = self._memory_logs[-self.max_entries:]
 
 
 class AuthService:
