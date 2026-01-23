@@ -4,6 +4,15 @@ import argparse
 import asyncio
 import logging
 import sys
+import os
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+from rich.logging import RichHandler
+from rich.status import Status
+from rich import print as rprint
 
 from .agent import run_agent
 from .secrets import (
@@ -11,71 +20,87 @@ from .secrets import (
     get_user_config_path, get_token_expiry_info, is_token_expired
 )
 
+VERSION = "4.5.5"
+console = Console()
 
 def setup_logging(verbose: bool = False) -> None:
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=level)
+    logging.basicConfig(
+        level=level,
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=[RichHandler(rich_tracebacks=True, show_path=False)]
+    )
 
+def print_banner():
+    """Print the killer splash screen."""
+    banner_text = r"""
+   _____        _   _                                _ _         
+  / ____|      | | (_)                              (_) |        
+ | |  __   __ _| |_ _  __ _ _ __ __ ___   _____ _ __ _| |_ _   _ 
+ | | |_ | / _` | __| |/ _` | '__/ _` \ \ / / _ \ '__| | __| | | |
+ | |__| || (_| | |_| | (_| | | | (_| |\ V /  __/ |  | | |_| |_| |
+  \_____| \__,_|\__|_|\__, |_|  \__,_| \_/ \___|_|  |_|\__|\__, |
+                       __/ |                                 __/ |
+                      |___/                                 |___/ 
+    """
+    console.print(Panel(Text(banner_text, style="cyan"), title=f"v{VERSION}", subtitle="Remote Control for Antigravity AI", border_style="blue"))
 
 def register_user() -> None:
     """Secure user registration."""
-    print("🔐 Antigravity Remote - Secure Registration")
-    print()
-    print("To get your credentials:")
-    print("1. Open Telegram and message @antigravityrcbot")
-    print("2. Send /start - you'll see your ID and Auth Token")
-    print()
+    print_banner()
+    rprint("[bold blue]🔐 Antigravity Remote - Secure Registration[/bold blue]")
+    rprint("\n[yellow]To get your credentials:[/yellow]")
+    rprint("1. Open Telegram and message [bold green]@antigravityrcbot[/bold green]")
+    rprint("2. Send /start - you'll see your ID and Auth Token\n")
     
-    user_id = input("Enter your Telegram User ID: ").strip()
+    user_id = console.input("[bold blue]Enter your Telegram User ID:[/bold blue] ").strip()
     if not user_id.isdigit():
-        print("❌ Invalid user ID. It should be a number.")
+        rprint("[bold red]❌ Invalid user ID. It should be a number.[/bold red]")
         sys.exit(1)
     
-    auth_token = input("Enter your Auth Token: ").strip()
+    auth_token = console.input("[bold blue]Enter your Auth Token:[/bold blue] ").strip()
     if len(auth_token) != 32:
-        print("❌ Invalid auth token. Should be 32 characters.")
+        rprint("[bold red]❌ Invalid auth token. Should be 32 characters.[/bold red]")
         sys.exit(1)
     
     save_user_config(user_id, auth_token)
-    print("✅ Registered securely!")
-    print(f"   Config saved to: {get_user_config_path()}")
-    print(f"   Token valid for 30 days")
-    print()
-    print("Now run: antigravity-remote")
-
+    rprint("\n[bold green]✅ Registered securely![/bold green]")
+    rprint(f"   Config saved to: [cyan]{get_user_config_path()}[/cyan]")
+    rprint(f"   Token valid for 30 days\n")
+    rprint("Now run: [bold white]antigravity-remote[/bold white]")
 
 def show_status() -> None:
     config = get_user_config()
     expiry_info = get_token_expiry_info()
     
-    print("📊 Antigravity Remote - Status")
-    print()
-    if config:
-        print(f"✅ User ID: {config['user_id']}")
-        token = config.get('auth_token', '')
-        if token:
-            print(f"🔑 Auth Token: {token[:8]}...")
-        else:
-            print("🔑 Auth Token: (not set)")
-        
-        # Show expiry
-        if expiry_info["valid"]:
-            days = expiry_info.get("days_remaining", -1)
-            if days > 7:
-                print(f"⏰ {expiry_info['message']}")
-            elif days > 0:
-                print(f"⚠️ {expiry_info['message']} - Consider refreshing!")
-            else:
-                print(f"ℹ️ {expiry_info['message']}")
-        else:
-            print(f"❌ {expiry_info['message']} - Run /start in Telegram to get a new token")
-    else:
-        print("❌ Not registered. Run: antigravity-remote --register")
-    
-    print(f"📁 Config: {get_user_config_path()}")
-    print()
-    print("📱 Bot: @antigravityrcbot")
+    print_banner()
+    table = Table(title="Agent Configuration", border_style="cyan")
+    table.add_column("Property", style="bold magenta")
+    table.add_column("Value", style="white")
 
+    if config:
+        table.add_row("User ID", config['user_id'])
+        token = config.get('auth_token', '')
+        table.add_row("Auth Token", f"{token[:8]}..." if token else "[red]Not Set[/red]")
+        
+        # Expiry logic
+        status_text = expiry_info["message"]
+        days = expiry_info.get("days_remaining", -1)
+        if expiry_info["valid"]:
+            status_style = "green" if days > 7 else "yellow"
+            table.add_row("Token Status", f"[{status_style}]{status_text}[/{status_style}]")
+        else:
+            table.add_row("Token Status", f"[red]{status_text}[/red]")
+    else:
+        table.add_row("Status", "[red]Not registered[/red]")
+    
+    table.add_row("Config Path", str(get_user_config_path()))
+    table.add_row("Bot", "[dim]@antigravityrcbot[/dim]")
+    
+    console.print(table)
+    if not config:
+        rprint("\n[red]Run:[/red] [bold]antigravity-remote --register[/bold]")
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Secure remote control for Antigravity AI")
@@ -88,7 +113,7 @@ def main() -> None:
     parser.add_argument("--token", help="Auth Token (overrides saved config)")
     parser.add_argument("--server", help="Custom server URL")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
-    parser.add_argument("--version", action="version", version="antigravity-remote 4.5.3")
+    parser.add_argument("--version", action="version", version=f"antigravity-remote {VERSION}")
     
     args = parser.parse_args()
     
@@ -102,15 +127,16 @@ def main() -> None:
     
     if args.unregister:
         clear_user_config()
-        print("✅ Unregistered. Token removed from secure storage.")
+        rprint("[bold green]✅ Unregistered.[/bold green] Token removed from secure storage.")
         return
     
     if args.refresh:
-        print("🔄 Token Refresh")
-        print("Send /start to @antigravityrcbot to get a new token,")
-        print("then run: antigravity-remote --register")
+        rprint("[bold yellow]🔄 Token Refresh[/bold yellow]")
+        rprint("Send [bold green]/start[/bold green] to @antigravityrcbot to get a new token,")
+        rprint("then run: [bold white]antigravity-remote --register[/bold white]")
         return
     
+    print_banner()
     setup_logging(args.verbose)
     
     user_id = args.id
@@ -119,48 +145,39 @@ def main() -> None:
     if not user_id or not auth_token:
         config = get_user_config()
         if not config:
-            if not user_id or not auth_token:
-                print("❌ Not registered!")
-                print()
-                print("Usage:")
-                print("  antigravity-remote --id YOUR_ID --token YOUR_TOKEN")
-                print("  antigravity-remote --register")
-                sys.exit(1)
+            rprint("[bold red]❌ Error: Not registered![/bold red]")
+            rprint("\nUsage:")
+            rprint("  [bold]antigravity-remote --id YOUR_ID --token YOUR_TOKEN[/bold]")
+            rprint("  [bold]antigravity-remote --register[/bold]")
+            sys.exit(1)
         
         user_id = user_id or config.get("user_id")
         auth_token = auth_token or config.get("auth_token")
     
     # If using CLI args, we don't check saved config
     if not args.id and not args.token:
-        # Check token expiry (only for saved config)
         if is_token_expired():
-            print("⚠️ Your token has expired or is expiring soon!")
-            print("Send /start to @antigravityrcbot for a new token.")
-            print("Then run: antigravity-remote --register")
-            print()
-            response = input("Continue anyway? [y/N]: ").strip().lower()
+            rprint("[bold yellow]⚠️ Your token has expired or is expiring soon![/bold yellow]")
+            rprint("Send [bold green]/start[/bold green] to @antigravityrcbot for a new token.")
+            rprint("Then run: [bold white]antigravity-remote --register[/bold white]\n")
+            response = console.input("[bold cyan]Continue anyway? [y/N]: [/bold cyan]").strip().lower()
             if response != 'y':
                 sys.exit(0)
     
-    print("🔐 Antigravity Remote Control (Secure)")
-    print(f"   User ID: {user_id}")
-    print(f"   Auth: {auth_token[:8]}...")
-    print(f"   Bot: @antigravityrcbot")
+    config_table = Table(box=None, show_header=False)
+    config_table.add_row("[bold cyan]User ID:[/bold cyan]", user_id)
+    config_table.add_row("[bold cyan]Auth Mode:[/bold cyan]", "Secure Token")
+    config_table.add_row("[bold cyan]Target:[/bold cyan]", "@antigravityrcbot")
     
-    expiry_info = get_token_expiry_info()
-    if expiry_info.get("days_remaining", -1) > 0:
-        print(f"   ⏰ {expiry_info['message']}")
-    
-    print()
-    print("📱 Open Telegram and message @antigravityrcbot to control your PC!")
-    print()
-    print("Press Ctrl+C to stop")
-    print()
+    console.print(Panel(config_table, title="[bold green]Connection Ready[/bold green]", border_style="green"))
+    rprint("[bold white]📱 Control your PC from your phone.[/bold white]")
+    rprint("[dim]Press Ctrl+C to stop[/dim]\n")
     
     try:
-        asyncio.run(run_agent(user_id, auth_token, args.server))
+        with Status("[bold blue]Connecting to bridge server...", console=console, spinner="dots12"):
+            asyncio.run(run_agent(user_id, auth_token, args.server))
     except KeyboardInterrupt:
-        print("\n👋 Shutting down...")
+        rprint("\n[bold yellow]👋 Shutting down...[/bold yellow]")
         sys.exit(0)
 
 

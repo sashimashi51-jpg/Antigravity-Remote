@@ -1,5 +1,5 @@
 """
-Antigravity Remote Agent - v4.3.1 VIBECODER EDITION
+Antigravity Remote Agent - v4.5.5 VIBECODER EDITION
 Features: Live Stream, AI Response Capture, TTS, Diff, Two-Way Chat
 """
 
@@ -33,7 +33,6 @@ try:
 except ImportError:
     TWO_WAY_CHAT_AVAILABLE = False
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 DEFAULT_SERVER_URL = os.environ.get("ANTIGRAVITY_SERVER", "wss://antigravity-remote.onrender.com/ws")
