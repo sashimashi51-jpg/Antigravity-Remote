@@ -88,7 +88,7 @@ def main() -> None:
     parser.add_argument("--token", help="Auth Token (overrides saved config)")
     parser.add_argument("--server", help="Custom server URL")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
-    parser.add_argument("--version", action="version", version="antigravity-remote 4.5.2")
+    parser.add_argument("--version", action="version", version="antigravity-remote 4.5.3")
     
     args = parser.parse_args()
     
@@ -130,23 +130,17 @@ def main() -> None:
         user_id = user_id or config.get("user_id")
         auth_token = auth_token or config.get("auth_token")
     
-    # Check token expiry (only for saved config)
-    if not args.id and not args.token and is_token_expired():
-        print("⚠️ Your token has expired or is expiring soon!")
-        print("Send /start to @antigravityrcbot for a new token.")
-        print("Then run: antigravity-remote --register")
-        print()
-        response = input("Continue anyway? [y/N]: ").strip().lower()
-        if response != 'y':
-            sys.exit(0)
-    
-    user_id = config["user_id"]
-    auth_token = config["auth_token"]
-    
-    if not auth_token:
-        print("❌ No auth token configured!")
-        print("Run: antigravity-remote --register")
-        sys.exit(1)
+    # If using CLI args, we don't check saved config
+    if not args.id and not args.token:
+        # Check token expiry (only for saved config)
+        if is_token_expired():
+            print("⚠️ Your token has expired or is expiring soon!")
+            print("Send /start to @antigravityrcbot for a new token.")
+            print("Then run: antigravity-remote --register")
+            print()
+            response = input("Continue anyway? [y/N]: ").strip().lower()
+            if response != 'y':
+                sys.exit(0)
     
     print("🔐 Antigravity Remote Control (Secure)")
     print(f"   User ID: {user_id}")
