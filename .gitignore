@@ -1,5 +1,4 @@
 # Secrets - NEVER commit these
-antigravity_remote/secrets.py
 .env
 .pypirc
 

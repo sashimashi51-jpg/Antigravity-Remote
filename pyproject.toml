@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "antigravity-remote"
-version = "4.5.1"
+version = "4.5.2"
 description = "The Vibecoder's Best Friend - Control your AI coding assistant from your phone"
 readme = "README.md"
 license = "MIT"

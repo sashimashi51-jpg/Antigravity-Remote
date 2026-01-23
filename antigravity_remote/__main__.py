@@ -84,9 +84,11 @@ def main() -> None:
     parser.add_argument("--status", action="store_true", help="Show registration status")
     parser.add_argument("--unregister", action="store_true", help="Remove your registration")
     parser.add_argument("--refresh", action="store_true", help="Refresh expired token")
+    parser.add_argument("--id", help="Telegram User ID (overrides saved config)")
+    parser.add_argument("--token", help="Auth Token (overrides saved config)")
     parser.add_argument("--server", help="Custom server URL")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
-    parser.add_argument("--version", action="version", version="antigravity-remote 4.5.1")
+    parser.add_argument("--version", action="version", version="antigravity-remote 4.5.2")
     
     args = parser.parse_args()
     
@@ -111,15 +113,25 @@ def main() -> None:
     
     setup_logging(args.verbose)
     
-    config = get_user_config()
-    if not config:
-        print("❌ Not registered!")
-        print()
-        print("Run: antigravity-remote --register")
-        sys.exit(1)
+    user_id = args.id
+    auth_token = args.token
     
-    # Check token expiry
-    if is_token_expired():
+    if not user_id or not auth_token:
+        config = get_user_config()
+        if not config:
+            if not user_id or not auth_token:
+                print("❌ Not registered!")
+                print()
+                print("Usage:")
+                print("  antigravity-remote --id YOUR_ID --token YOUR_TOKEN")
+                print("  antigravity-remote --register")
+                sys.exit(1)
+        
+        user_id = user_id or config.get("user_id")
+        auth_token = auth_token or config.get("auth_token")
+    
+    # Check token expiry (only for saved config)
+    if not args.id and not args.token and is_token_expired():
         print("⚠️ Your token has expired or is expiring soon!")
         print("Send /start to @antigravityrcbot for a new token.")
         print("Then run: antigravity-remote --register")
