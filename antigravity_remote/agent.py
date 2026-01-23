@@ -1,6 +1,6 @@
 """
-Antigravity Remote Agent - v4.5.5 VIBECODER EDITION
-Features: Live Stream, AI Response Capture, TTS, Diff, Two-Way Chat
+Antigravity Remote Agent - v4.6.0 VIBECODER EDITION
+Features: H.264 Video, Real-Time Telemetry, AI Response Capture, TTS, Diff
 """
 
 import asyncio
@@ -12,10 +12,19 @@ import time
 import hashlib
 import re
 import subprocess
+import psutil
+import io
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 
 import websockets
+try:
+    import av
+    import mss
+    from PIL import Image
+    HAS_VIDEO_ENCODER = True
+except ImportError:
+    HAS_VIDEO_ENCODER = False
 
 from .utils import (
     send_to_antigravity,
@@ -92,11 +101,67 @@ class LocalAgent:
             self.clipboard_monitor.start()
             logger.info("📋 Two-Way Chat: Clipboard monitoring enabled")
     
-    def stop_clipboard_monitor(self):
+    async def stop_clipboard_monitor(self):
         """Stop clipboard monitoring."""
         if self.clipboard_monitor:
             self.clipboard_monitor.stop()
             self.clipboard_monitor = None
+
+    def get_telemetry(self) -> Dict:
+        """Gather technical telemetry for the 'Nerd Edition' dashboard."""
+        try:
+            cpu_usage = psutil.cpu_percent(interval=None)
+            memory = psutil.virtual_memory()
+            
+            # Find active coding process
+            active_proc = "Idle"
+            for proc in psutil.process_iter(['name']):
+                if proc.info['name'] in ['Code.exe', 'Cursor.exe', 'python.exe', 'cmd.exe', 'powershell.exe']:
+                    active_proc = proc.info['name']
+                    break
+                    
+            return {
+                "cpu": cpu_usage,
+                "ram": memory.percent,
+                "process": active_proc,
+                "timestamp": time.time(),
+                "agent_status": "Streaming" if getattr(self, 'streaming', False) else "Online"
+            }
+        except Exception as e:
+            logger.error(f"Telemetry error: {e}")
+            return {"error": str(e)}
+
+class H264Encoder:
+    """High-performance H.264 video encoder for fMP4 streaming."""
+    def __init__(self, width=1280, height=720, fps=15):
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.output = io.BytesIO()
+        self.container = av.open(self.output, mode='w', format='mp4')
+        self.stream = self.container.add_stream('libx264', rate=fps)
+        self.stream.width = width
+        self.stream.height = height
+        self.stream.pix_fmt = 'yuv420p'
+        self.stream.options = {
+            'preset': 'ultrafast',
+            'tune': 'zerolatency',
+            'crf': '28'
+        }
+        # Enable fragmentation for fMP4
+        self.container.mux_base.flags |= 0x40  # frag_keyframe
+        self.container.mux_base.max_delay = 0
+
+    def encode_frame(self, pil_image) -> bytes:
+        """Encode a single PIL image and return the produced fragment."""
+        self.output.seek(0)
+        self.output.truncate()
+        
+        frame = av.VideoFrame.from_image(pil_image)
+        for packet in self.stream.encode(frame):
+            self.container.mux(packet)
+            
+        return self.output.getvalue()
     
     async def connect(self):
         url = f"{self.server_url}/{self.user_id}"
@@ -172,30 +237,79 @@ class LocalAgent:
         except:
             pass
     
-    async def stream_screen(self, fps: int = 2):
-        """Stream screen to server."""
-        logger.info(f"📺 Starting stream at {fps} FPS")
+    async def run_telemetry(self):
+        """Continuously push technical telemetry."""
+        logger.info("📊 Telemetry monitor started")
+        while self.running and self.websocket:
+            try:
+                telemetry = self.get_telemetry()
+                await self.websocket.send(json.dumps({
+                    "type": "telemetry",
+                    "data": telemetry
+                }))
+                await asyncio.sleep(2)  # Update every 2 seconds
+            except:
+                await asyncio.sleep(5)
+
+    async def stream_screen(self, fps: int = 15):
+        """Stream screen to server using H.264 video encoding."""
+        if not HAS_VIDEO_ENCODER:
+            logger.warning("⚠️ H.264 encoding not available, falling back to JPEG")
+            return await self.stream_screen_legacy(fps=2)
+
+        logger.info(f"📺 Starting H.264 stream at {fps} FPS")
+        encoder = H264Encoder(fps=fps)
+        sct = mss.mss()
+        monitor = sct.monitors[1]  # Primary monitor
+        
         delay = 1.0 / fps
         
         while self.streaming and self.websocket:
             try:
-                path = take_screenshot(quality=50, max_width=1280)
+                start_time = time.time()
+                
+                # Capture frame
+                screenshot = sct.grab(monitor)
+                img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
+                
+                # Resize for performance if needed
+                if img.width > 1280:
+                    img = img.resize((1280, int(1280 * img.height / img.width)), Image.Resampling.LANCZOS)
+                
+                # Encode and send
+                chunk = encoder.encode_frame(img)
+                if chunk:
+                    await self.websocket.send(chunk)
+                
+                # Adaptive sleep to maintain FPS
+                elapsed = time.time() - start_time
+                await asyncio.sleep(max(0, delay - elapsed))
+                
+            except Exception as e:
+                logger.error(f"H.264 Stream error: {e}")
+                break
+        
+        logger.info("📺 H.264 Stream stopped")
+
+    async def stream_screen_legacy(self, fps: int = 2):
+        """Fallback JPEG streaming."""
+        logger.info(f"📺 Starting legacy JPEG stream at {fps} FPS")
+        delay = 1.0 / fps
+        while self.streaming and self.websocket:
+            try:
+                path = take_screenshot(quality=60, max_width=1280)
                 if path:
                     with open(path, "rb") as f:
                         frame_data = base64.b64encode(f.read()).decode()
                     cleanup_screenshot(path)
-                    
                     await self.websocket.send(json.dumps({
                         "type": "stream_frame",
                         "data": frame_data
                     }))
-                
                 await asyncio.sleep(delay)
             except Exception as e:
-                logger.error(f"Stream error: {e}")
+                logger.error(f"Legacy stream error: {e}")
                 break
-        
-        logger.info("📺 Stream stopped")
     
     async def run_watchdog(self):
         logger.info("🐕 Watchdog started")
@@ -543,9 +657,15 @@ class LocalAgent:
                 
                 reconnect_delay = 5
                 heartbeat_task = asyncio.create_task(self.send_heartbeat())
+                telemetry_task = asyncio.create_task(self.run_telemetry())
+                watchdog_task = asyncio.create_task(self.run_watchdog())
                 
                 try:
                     async for message in self.websocket:
+                        # Handle binary messages (video frames)
+                        if isinstance(message, bytes):
+                            continue # We only send binary, don't expect to receive them
+                            
                         command = json.loads(message)
                         cmd_type = command.get('type')
                         
@@ -553,10 +673,19 @@ class LocalAgent:
                             continue
                         
                         logger.info(f"📥 {cmd_type}")
-                        result = await self.handle_command(command)
+                        if cmd_type == "stream":
+                            self.streaming = not self.streaming
+                            if self.streaming:
+                                asyncio.create_task(self.stream_screen())
+                            result = {"type": "stream_status", "active": self.streaming}
+                        else:
+                            result = await self.handle_command(command)
+                            
                         await self.websocket.send(json.dumps(result))
                 finally:
                     heartbeat_task.cancel()
+                    telemetry_task.cancel()
+                    watchdog_task.cancel()
                     self.streaming = False
                     
             except websockets.exceptions.ConnectionClosed:
