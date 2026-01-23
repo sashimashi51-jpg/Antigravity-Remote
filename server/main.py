@@ -29,8 +29,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 logger.info("=" * 50)
-logger.info("Antigravity Remote Server - v4.1.0 VIBECODER EDITION")
-logger.info("Features: SQLite Persistence, Live Stream, Two-Way Chat")
+logger.info("Antigravity Remote Server - v4.2.0 VIBECODER EDITION")
+logger.info("Features: SQLite Persistence, Modular Architecture, Two-Way Chat")
 logger.info("=" * 50)
 
 # ============ Configuration ============
@@ -108,37 +108,48 @@ class RateLimiterService:
 
 
 class CommandQueueService:
+    """Command queue with SQLite persistence."""
     def __init__(self, max_size: int = 50, ttl_seconds: int = 300):
-        self.queues: Dict[str, deque] = defaultdict(deque)
+        # Fallback in-memory storage if persistence disabled
+        self._memory_queues: Dict[str, deque] = defaultdict(deque)
         self.max_size = max_size
         self.ttl = ttl_seconds
     
     def enqueue(self, user_id: str, command: dict) -> bool:
-        self._cleanup_expired(user_id)
-        if len(self.queues[user_id]) >= self.max_size:
-            return False
-        command["_queued_at"] = time.time()
-        self.queues[user_id].append(command)
-        return True
+        if PERSISTENCE_ENABLED:
+            return CommandQueueRepository.enqueue(user_id, command, self.ttl)
+        else:
+            self._cleanup_expired(user_id)
+            if len(self._memory_queues[user_id]) >= self.max_size:
+                return False
+            command["_queued_at"] = time.time()
+            self._memory_queues[user_id].append(command)
+            return True
     
     def dequeue_all(self, user_id: str) -> List[dict]:
-        self._cleanup_expired(user_id)
-        commands = list(self.queues[user_id])
-        self.queues[user_id].clear()
-        for cmd in commands:
-            cmd.pop("_queued_at", None)
-        return commands
+        if PERSISTENCE_ENABLED:
+            return CommandQueueRepository.dequeue_all(user_id)
+        else:
+            self._cleanup_expired(user_id)
+            commands = list(self._memory_queues[user_id])
+            self._memory_queues[user_id].clear()
+            for cmd in commands:
+                cmd.pop("_queued_at", None)
+            return commands
     
     def _cleanup_expired(self, user_id: str):
         now = time.time()
-        self.queues[user_id] = deque(
-            cmd for cmd in self.queues[user_id]
+        self._memory_queues[user_id] = deque(
+            cmd for cmd in self._memory_queues[user_id]
             if now - cmd.get("_queued_at", 0) < self.ttl
         )
     
     def get_queue_size(self, user_id: str) -> int:
-        self._cleanup_expired(user_id)
-        return len(self.queues[user_id])
+        if PERSISTENCE_ENABLED:
+            return CommandQueueRepository.get_queue_size(user_id)
+        else:
+            self._cleanup_expired(user_id)
+            return len(self._memory_queues[user_id])
 
 
 class HeartbeatService:
