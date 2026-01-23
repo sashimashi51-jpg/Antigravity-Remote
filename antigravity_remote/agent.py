@@ -412,7 +412,7 @@ class LocalAgent:
             
             elif cmd_type == "scroll":
                 direction = command.get("direction", "down")
-                clicks = {"up": 25, "down": -25, "top": 500, "bottom": -500}.get(direction, -25)
+                clicks = {"up": 100, "down": -100, "top": 1000, "bottom": -1000}.get(direction, -100)
                 result["success"] = scroll_screen(clicks)
             
             elif cmd_type == "key":

@@ -255,7 +255,7 @@ async def stream_page(user_id: str):
 
 @router.websocket("/stream/{user_id}/ws")
 async def stream_websocket(websocket: WebSocket, user_id: str):
-    """WebSocket endpoint for real-time screen streaming."""
+    """WebSocket endpoint for real-time screen streaming with concurrent command handling."""
     await websocket.accept()
     
     # Add viewer to list
@@ -265,48 +265,60 @@ async def stream_websocket(websocket: WebSocket, user_id: str):
     
     logger.info(f"📺 Stream viewer connected for user {user_id[-4:]}")
     
-    try:
-        # Send frames as they come in
-        while True:
-            if live_stream:
-                frame = live_stream.get_frame(user_id)
-                if frame:
-                    # Send as base64
-                    frame_b64 = base64.b64encode(frame).decode()
-                    await websocket.send_text(frame_b64)
-            
-            # Check for commands from viewer
-            try:
-                data = await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
-                cmd_msg = json.loads(data)
-                cmd_type = cmd_msg.get("command")
-                
-                if cmd_type and send_cmd:
-                    logger.info(f"🚀 Relaying viewer command: {cmd_type} for {user_id[-4:]}")
+    async def send_frames():
+        try:
+            while True:
+                if live_stream:
+                    frame = live_stream.get_frame(user_id)
+                    if frame:
+                        frame_b64 = base64.b64encode(frame).decode()
+                        await websocket.send_text(frame_b64)
+                await asyncio.sleep(0.08)  # ~12 FPS
+        except Exception as e:
+            logger.error(f"Error sending frames: {e}")
+
+    async def receive_commands():
+        try:
+            while True:
+                data = await websocket.receive_text()
+                try:
+                    cmd_msg = json.loads(data)
+                    cmd_type = cmd_msg.get("command")
                     
-                    # Convert browser command to agent command
-                    agent_cmd = None
-                    if cmd_type == "accept":
-                        agent_cmd = {"type": "accept"}
-                    elif cmd_type == "reject":
-                        agent_cmd = {"type": "reject"}
-                    elif cmd_type == "screenshot":
-                        agent_cmd = {"type": "screenshot", "quality": 80}
-                    elif cmd_type == "scroll_up":
-                        agent_cmd = {"type": "scroll", "direction": "up"}
-                    elif cmd_type == "scroll_down":
-                        agent_cmd = {"type": "scroll", "direction": "down"}
+                    if cmd_type and send_cmd:
+                        logger.info(f"🚀 Relaying browser command: {cmd_type} for {user_id[-4:]}")
                         
-                    if agent_cmd:
-                        # Send in background to not block stream
-                        asyncio.create_task(send_cmd(user_id, agent_cmd))
-                        
-            except asyncio.TimeoutError:
-                pass
-            except json.JSONDecodeError:
-                pass
-            
-            await asyncio.sleep(0.1)  # ~10 FPS max polling
+                        agent_cmd = None
+                        if cmd_type == "accept":
+                            agent_cmd = {"type": "accept"}
+                        elif cmd_type == "reject":
+                            agent_cmd = {"type": "reject"}
+                        elif cmd_type == "screenshot":
+                            agent_cmd = {"type": "screenshot", "quality": 80}
+                        elif cmd_type == "scroll_up":
+                            agent_cmd = {"type": "scroll", "direction": "up"}
+                        elif cmd_type == "scroll_down":
+                            agent_cmd = {"type": "scroll", "direction": "down"}
+                            
+                        if agent_cmd:
+                            await send_cmd(user_id, agent_cmd)
+                except json.JSONDecodeError:
+                    pass
+        except WebSocketDisconnect:
+            pass
+        except Exception as e:
+            logger.error(f"Error receiving commands: {e}")
+
+    try:
+        # Run both tasks concurrently
+        await asyncio.gather(send_frames(), receive_commands())
+    except Exception as e:
+        logger.error(f"Stream WebSocket session error: {e}")
+    finally:
+        logger.info(f"📺 Stream viewer disconnected for user {user_id[-4:]}")
+        if user_id in stream_viewers:
+            stream_viewers[user_id] = [v for v in stream_viewers[user_id] if v != websocket]
+
             
     except WebSocketDisconnect:
         logger.info(f"📺 Stream viewer disconnected for user {user_id[-4:]}")
