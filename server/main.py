@@ -205,53 +205,18 @@ class HeartbeatService:
 
 class VoiceTranscriptionService:
     """
-    Transcribe audio using OpenAI Whisper API.
-    Fallback to file path if API key not configured.
+    Voice transcription now happens LOCALLY on the agent side.
+    Server just relays audio to agent.
     """
-    def __init__(self, api_key: str = ""):
-        self.api_key = api_key
-        self.enabled = bool(api_key)
-        if self.enabled:
-            logger.info("Voice transcription enabled (Whisper API)")
-        else:
-            logger.info("Voice transcription disabled (no OPENAI_API_KEY)")
+    def __init__(self):
+        logger.info("Voice transcription: local (faster-whisper on agent)")
     
     async def transcribe(self, audio_data: bytes, format: str = "ogg") -> Optional[str]:
         """
-        Transcribe audio to text using Whisper API.
-        Returns None if transcription fails.
+        Note: Transcription now happens on the agent side using local Whisper.
+        This method is kept for API compatibility but returns None.
         """
-        if not self.enabled:
-            logger.info("Transcription skipped: no API key")
-            return None
-        
-        try:
-            async with httpx.AsyncClient() as client:
-                # Whisper API expects multipart form data
-                files = {
-                    "file": (f"audio.{format}", audio_data, f"audio/{format}"),
-                    "model": (None, "whisper-1"),
-                }
-                
-                response = await client.post(
-                    "https://api.openai.com/v1/audio/transcriptions",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    files=files,
-                    timeout=30.0
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    text = result.get("text", "").strip()
-                    logger.info(f"Transcribed: {text[:50]}...")
-                    return text
-                else:
-                    logger.error(f"Whisper API error: {response.status_code} - {response.text}")
-                    return None
-                    
-        except Exception as e:
-            logger.error(f"Transcription error: {e}")
-            return None
+        return None  # Agent will transcribe locally
 
 
 class AuditLoggerService:

@@ -174,24 +174,65 @@ class LocalAgent:
         logger.info("🐕 Watchdog stopped")
     
     def process_voice(self, audio_path: Path) -> str:
-        """Transcribe voice file using SpeechRecognition."""
+        """
+        Transcribe voice file using local Whisper (FREE, no API).
+        Falls back to Google Speech Recognition if Whisper not available.
+        """
+        # Try faster-whisper first (best quality, runs locally)
+        try:
+            from faster_whisper import WhisperModel
+            
+            # Use tiny model for speed (can upgrade to base/small for accuracy)
+            if not hasattr(self, '_whisper_model'):
+                logger.info("Loading Whisper model (first time, may take a moment)...")
+                self._whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
+            
+            # Convert OGG to WAV if needed
+            wav_path = audio_path
+            if audio_path.suffix.lower() == '.ogg':
+                try:
+                    from pydub import AudioSegment
+                    wav_path = audio_path.with_suffix('.wav')
+                    sound = AudioSegment.from_ogg(str(audio_path))
+                    sound.export(str(wav_path), format="wav")
+                except Exception:
+                    pass  # Try with OGG directly
+            
+            segments, info = self._whisper_model.transcribe(str(wav_path), beam_size=5)
+            text = " ".join([segment.text for segment in segments]).strip()
+            
+            if text:
+                logger.info(f"Whisper transcribed: {text[:50]}...")
+                return text
+                
+        except ImportError:
+            logger.debug("faster-whisper not installed, trying fallback...")
+        except Exception as e:
+            logger.warning(f"Whisper error: {e}, trying fallback...")
+        
+        # Fallback to Google Speech Recognition (also free, but less reliable)
         try:
             import speech_recognition as sr
             from pydub import AudioSegment
             
-            # Convert OGG to WAV
             wav_path = audio_path.with_suffix('.wav')
-            sound = AudioSegment.from_ogg(str(audio_path))
-            sound.export(str(wav_path), format="wav")
+            if audio_path.suffix.lower() == '.ogg':
+                sound = AudioSegment.from_ogg(str(audio_path))
+                sound.export(str(wav_path), format="wav")
             
             r = sr.Recognizer()
             with sr.AudioFile(str(wav_path)) as source:
                 audio = r.record(source)
                 text = r.recognize_google(audio)
+                logger.info(f"Google STT transcribed: {text[:50]}...")
                 return text
+                
+        except ImportError:
+            logger.warning("Neither faster-whisper nor speech_recognition installed")
         except Exception as e:
-            logger.error(f"Transcription failed: {e}")
-            return ""
+            logger.error(f"All transcription methods failed: {e}")
+        
+        return ""
 
     async def handle_command(self, command: dict) -> dict:
         cmd_type = command.get("type")
