@@ -1,6 +1,6 @@
 """Antigravity Remote - Secure remote control via Telegram."""
 
-__version__ = "4.5.3"
+__version__ = "4.5.4"
 
 from .agent import LocalAgent, run_agent
 from .secrets import get_user_config, save_user_config

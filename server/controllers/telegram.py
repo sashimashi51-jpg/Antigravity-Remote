@@ -113,18 +113,26 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     expiry_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d")
     
     await update.message.reply_text(
-        f"🚀 *Antigravity Remote v4.3*\n"
+        f"🚀 *Antigravity Remote v4.5.4*\n"
         f"_The Vibecoder's Best Friend_\n\n"
         f"ID: `{uid}`\n"
         f"Status: {status}\n"
         f"Token: `{auth_token}`\n"
         f"Expires: {expiry_date}\n\n"
-        f"*Features:*\n"
-        f"📺 /stream - Live screen view\n"
-        f"💬 Two-way chat with AI\n"
-        f"📋 /diff - Preview code changes\n"
-        f"⏰ /schedule - Automated tasks\n"
-        f"🔄 /undo N - Undo N changes\n\n"
+        f"*🎮 Live Control:*\n"
+        f"📺 /stream - Real-time screen view (WebSocket)\n"
+        f"📸 /ss - Take a screenshot\n"
+        f"⬆️ /scroll up | ⬇️ /scroll down\n"
+        f"✅ /accept | ❌ /reject - Quick AI approval\n\n"
+        f"*🧠 AI & Code:*\n"
+        f"💬 Send any text to chat with AI\n"
+        f"📋 /diff - Preview pending code changes\n"
+        f"↩️ /undo N - Undo last N changes\n"
+        f"🗣️ /tts - Read AI response aloud\n\n"
+        f"*⚙️ Automation:*\n"
+        f"⏰ /schedule HH:MM cmd - Periodic tasks\n"
+        f"🐕 /watchdog on/off - Auto-alerts when AI stops\n"
+        f"⏸️ /pause | ▶️ /resume - Control agent\n\n"
         f"`pip install antigravity-remote`",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=get_mini_keyboard()

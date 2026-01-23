@@ -46,14 +46,30 @@ antigravity-remote
 
 ## Commands (in Telegram)
 
+### 🎮 Live Control
 | Command | Description |
 |---------|-------------|
-| `/status` | Take screenshot |
-| `/scroll up/down` | Scroll chat |
-| `/accept` / `/reject` | Accept/reject |
-| `/key ctrl+s` | Send key combo |
-| `/quick` | Quick reply buttons |
-| Any text | Relay to Antigravity |
+| `/stream` | Start real-time WebSocket stream |
+| `/status` or `/ss` | Take a high-quality screenshot |
+| `/scroll up/down` | Scroll the active window |
+| `/accept` / `/reject` | Quick AI approval buttons |
+
+### 🧠 AI & Code
+| Command | Description |
+|---------|-------------|
+| `Any text` | Relay instruction to AI agent |
+| `/diff` | Preview pending code changes |
+| `/undo N` | Revert last N changes |
+| `/tts` | Read AI response aloud (TTS) |
+
+### ⚙️ Automation & Settings
+| Command | Description |
+|---------|-------------|
+| `/schedule 9:00 cmd` | Automate a task at a specific time |
+| `/watchdog on/off` | Alerts when AI stops or needs input |
+| `/quick` | Show action button keyboard |
+| `/model` | Switch between AI models |
+| `/pause` / `/resume` | Temporary pause/resume agent |
 
 ## How It Works
 
