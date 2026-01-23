@@ -155,21 +155,29 @@ class SchedulerService:
 
 
 class UndoStackService:
-    """Undo stack with SQLite persistence."""
+    """Undo stack with SQLite persistence and in-memory fallback."""
+    def __init__(self, max_size: int = 10):
+        # In-memory fallback
+        self._memory_stacks: Dict[str, deque] = defaultdict(lambda: deque(maxlen=max_size))
+        self.max_size = max_size
+    
     def push(self, user_id: str, action: str):
         if PERSISTENCE_ENABLED:
             UserSessionRepository.push_undo(user_id, action)
-        # In-memory fallback handled internally
+        else:
+            self._memory_stacks[user_id].append({"action": action, "time": time.time()})
     
     def get_stack(self, user_id: str) -> List[dict]:
         if PERSISTENCE_ENABLED:
             session = UserSessionRepository.get_or_create(user_id)
             return session['undo_stack']
-        return []
+        return list(self._memory_stacks[user_id])
     
     def clear(self, user_id: str):
         if PERSISTENCE_ENABLED:
             UserSessionRepository.update_undo_stack(user_id, [])
+        else:
+            self._memory_stacks[user_id].clear()
 
 
 class LiveStreamService:

@@ -1,6 +1,6 @@
 """
-Antigravity Remote Agent - v4.0.0 VIBECODER EDITION
-Features: Live Stream, AI Response Capture, TTS, Diff, Better Screenshots
+Antigravity Remote Agent - v4.3.1 VIBECODER EDITION
+Features: Live Stream, AI Response Capture, TTS, Diff, Two-Way Chat
 """
 
 import asyncio
@@ -25,6 +25,13 @@ from .utils import (
     cleanup_screenshot,
     focus_antigravity,
 )
+
+# Two-Way Chat - Clipboard monitoring for AI responses
+try:
+    from .two_way_chat import ClipboardMonitor
+    TWO_WAY_CHAT_AVAILABLE = True
+except ImportError:
+    TWO_WAY_CHAT_AVAILABLE = False
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -61,8 +68,36 @@ class LocalAgent:
         self.stream_task = None
         self.last_ai_response = ""
         
+        # Two-Way Chat: Clipboard monitor for AI responses
+        self.clipboard_monitor = None
+        self._event_loop = None
+        
         self.downloads_dir = Path.home() / "Downloads" / "AntigravityRemote"
         self.downloads_dir.mkdir(parents=True, exist_ok=True)
+    
+    def _on_ai_response_detected(self, text: str):
+        """Callback when clipboard monitor detects AI response."""
+        if self._event_loop and self.websocket:
+            asyncio.run_coroutine_threadsafe(
+                self.send_ai_response(text),
+                self._event_loop
+            )
+    
+    def start_clipboard_monitor(self):
+        """Start monitoring clipboard for AI responses."""
+        if TWO_WAY_CHAT_AVAILABLE and not self.clipboard_monitor:
+            self.clipboard_monitor = ClipboardMonitor(
+                callback=self._on_ai_response_detected,
+                interval=1.5
+            )
+            self.clipboard_monitor.start()
+            logger.info("📋 Two-Way Chat: Clipboard monitoring enabled")
+    
+    def stop_clipboard_monitor(self):
+        """Stop clipboard monitoring."""
+        if self.clipboard_monitor:
+            self.clipboard_monitor.stop()
+            self.clipboard_monitor = None
     
     async def connect(self):
         url = f"{self.server_url}/{self.user_id}"
@@ -494,6 +529,12 @@ class LocalAgent:
         self.running = True
         reconnect_delay = 5
         
+        # Store event loop for clipboard monitor callback
+        self._event_loop = asyncio.get_event_loop()
+        
+        # Start Two-Way Chat clipboard monitoring
+        self.start_clipboard_monitor()
+        
         while self.running:
             try:
                 if not await self.connect():
@@ -531,6 +572,7 @@ class LocalAgent:
         self.running = False
         self.watchdog_enabled = False
         self.streaming = False
+        self.stop_clipboard_monitor()
         if self.websocket:
             asyncio.create_task(self.websocket.close())
 
