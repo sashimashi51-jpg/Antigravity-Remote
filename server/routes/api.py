@@ -132,7 +132,7 @@ async def stream_page(user_id: str):
             </div>
             
             <div class="stream-container">
-                <video id="videoPlayer" autoplay muted playsinline></video>
+                <img id="streamImage" src="" alt="Loading stream...">
                 <div style="position: absolute; top: 10px; right: 10px; display: flex; gap: 10px;">
                     <span id="fps" class="metric-val" style="font-size: 0.8rem; background: rgba(0,0,0,0.5); padding: 4px 8px; border-radius: 4px;">-- FPS</span>
                 </div>
@@ -179,12 +179,11 @@ async def stream_page(user_id: str):
         </div>
         
         <script>
-            const video = document.getElementById('videoPlayer');
+            const img = document.getElementById('streamImage');
             const wsUrl = '{ws_host}/stream/{user_id}/ws';
             let ws = null;
-            let mediaSource = null;
-            let sourceBuffer = null;
-            let queue = [];
+            let frameCount = 0;
+            let fpsCounter = [];
             
             function addLog(msg) {{
                 const logs = document.getElementById('logs');
@@ -196,52 +195,40 @@ async def stream_page(user_id: str):
                 if (logs.childNodes.length > 50) logs.removeChild(logs.lastChild);
             }}
 
-            function initMSE() {{
-                mediaSource = new MediaSource();
-                video.src = URL.createObjectURL(mediaSource);
-                mediaSource.addEventListener('sourceopen', () => {{
-                    sourceBuffer = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');
-                    sourceBuffer.mode = 'sequence';
-                    sourceBuffer.addEventListener('updateend', () => {{
-                        if (queue.length > 0 && !sourceBuffer.updating) {{
-                            sourceBuffer.appendBuffer(queue.shift());
-                        }}
-                    }});
-                }});
-            }}
-
             function connect() {{
-                addLog('Attempting WebSocket handshake...');
+                addLog('Connecting to stream...');
                 ws = new WebSocket(wsUrl);
-                ws.binaryType = 'arraybuffer';
                 
-                ws.onopen = () => addLog('Connected to bridge server.');
+                ws.onopen = () => addLog('Connected! Awaiting frames...');
                 
-                ws.onmessage = async (event) => {{
-                    if (typeof event.data === 'string') {{
-                        try {{
-                            const msg = JSON.parse(event.data);
-                            if (msg.type === 'telemetry') {{
-                                const data = msg.data;
-                                document.getElementById('cpuMetric').textContent = data.cpu.toFixed(1) + '%';
-                                document.getElementById('ramMetric').textContent = data.ram.toFixed(1) + '%';
-                                document.getElementById('processMetric').textContent = data.process;
-                                document.getElementById('agentStatus').textContent = data.agent_status.toUpperCase();
-                                if (data.process !== 'Idle') addLog('Active process: ' + data.process);
-                            }}
-                        }} catch(e) {{}}
-                    }} else {{
-                        // Binary video chunk
-                        if (sourceBuffer && !sourceBuffer.updating) {{
-                            sourceBuffer.appendBuffer(new Uint8Array(event.data));
-                        }} else {{
-                            queue.push(new Uint8Array(event.data));
+                ws.onmessage = (event) => {{
+                    try {{
+                        const msg = JSON.parse(event.data);
+                        
+                        if (msg.type === 'stream_frame') {{
+                            // MJPEG frame
+                            img.src = 'data:image/jpeg;base64,' + msg.data;
+                            frameCount++;
+                            
+                            // Calculate FPS
+                            const now = Date.now();
+                            fpsCounter.push(now);
+                            fpsCounter = fpsCounter.filter(t => now - t < 1000);
+                            document.getElementById('fps').textContent = fpsCounter.length + ' FPS';
+                        }} else if (msg.type === 'telemetry') {{
+                            const data = msg.data;
+                            document.getElementById('cpuMetric').textContent = data.cpu.toFixed(1) + '%';
+                            document.getElementById('ramMetric').textContent = data.ram.toFixed(1) + '%';
+                            document.getElementById('processMetric').textContent = data.process;
+                            document.getElementById('agentStatus').textContent = data.agent_status.toUpperCase();
                         }}
+                    }} catch(e) {{
+                        addLog('Frame parse error');
                     }}
                 }};
                 
                 ws.onclose = () => {{
-                    addLog('Connection lost. Retrying...');
+                    addLog('Disconnected. Retrying...');
                     setTimeout(connect, 2000);
                 }};
             }}
@@ -249,11 +236,10 @@ async def stream_page(user_id: str):
             function sendCommand(cmd) {{
                 if (ws && ws.readyState === 1) {{
                     ws.send(JSON.stringify({{command: cmd}}));
-                    addLog('Sent command: ' + cmd.toUpperCase());
+                    addLog('Sent: ' + cmd.toUpperCase());
                 }}
             }}
             
-            initMSE();
             connect();
         </script>
     </body>

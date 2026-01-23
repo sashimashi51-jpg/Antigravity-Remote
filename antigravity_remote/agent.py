@@ -658,7 +658,11 @@ class H264Encoder:
                 reconnect_delay = 5
                 heartbeat_task = asyncio.create_task(self.send_heartbeat())
                 telemetry_task = asyncio.create_task(self.run_telemetry())
-                watchdog_task = asyncio.create_task(self.run_watchdog())
+                
+                # Auto-start streaming for connected viewers
+                self.streaming = True
+                stream_task = asyncio.create_task(self.stream_screen_legacy(fps=8))
+                logger.info("📺 Auto-started MJPEG stream for connected viewers")
                 
                 try:
                     async for message in self.websocket:
@@ -685,7 +689,7 @@ class H264Encoder:
                 finally:
                     heartbeat_task.cancel()
                     telemetry_task.cancel()
-                    watchdog_task.cancel()
+                    stream_task.cancel()
                     self.streaming = False
                     
             except websockets.exceptions.ConnectionClosed:
