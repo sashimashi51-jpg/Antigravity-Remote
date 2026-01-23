@@ -4,15 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "antigravity-remote"
-version = "3.3.1"
-description = "Remote control your Antigravity AI assistant via Telegram"
+version = "4.0.0"
+description = "The Vibecoder's Best Friend - Control your AI coding assistant from your phone"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
     { name = "Kubrat" }
 ]
-keywords = ["telegram", "bot", "antigravity", "remote", "ai", "automation"]
+keywords = ["telegram", "bot", "antigravity", "remote", "ai", "automation", "vibecoder", "mobile-coding"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
@@ -22,6 +22,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Communications :: Chat",
 ]
 
@@ -46,6 +47,15 @@ secure = [
 voice = [
     "faster-whisper>=0.9.0",
     "pydub>=0.25.0",
+]
+tts = [
+    "pyttsx3>=2.90",
+]
+all = [
+    "keyring>=23.0.0",
+    "faster-whisper>=0.9.0",
+    "pydub>=0.25.0",
+    "pyttsx3>=2.90",
 ]
 dev = [
     "pytest>=7.0.0",

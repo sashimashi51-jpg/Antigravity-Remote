@@ -1,6 +1,6 @@
 """
-Local Agent for Antigravity Remote - SECURE VERSION
-Handles authentication and all commands including MEDIA (Voice, Photo, Files)
+Antigravity Remote Agent - v4.0.0 VIBECODER EDITION
+Features: Live Stream, AI Response Capture, TTS, Diff, Better Screenshots
 """
 
 import asyncio
@@ -11,7 +11,9 @@ import os
 import time
 import hashlib
 import re
+import subprocess
 from pathlib import Path
+from typing import Optional
 
 import websockets
 
@@ -29,14 +31,13 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SERVER_URL = os.environ.get("ANTIGRAVITY_SERVER", "wss://antigravity-remote.onrender.com/ws")
 
-# OCR keywords
+# Keywords for watchdog
 APPROVAL_KEYWORDS = ["run command", "accept changes", "proceed", "approve", "allow", "confirm", "y/n"]
 DONE_KEYWORDS = ["anything else", "let me know", "task complete", "done!", "successfully", "finished"]
 ERROR_KEYWORDS = ["error:", "failed", "exception", "traceback", "cannot", "permission denied"]
 
 
 def sanitize_input(text: str, max_length: int = 4000) -> str:
-    """Sanitize input."""
     if not text:
         return ""
     text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
@@ -44,7 +45,7 @@ def sanitize_input(text: str, max_length: int = 4000) -> str:
 
 
 class LocalAgent:
-    """Secure local agent with authentication and media support."""
+    """v4.0 Agent with all vibecoder features."""
     
     def __init__(self, user_id: str, auth_token: str, server_url: str = None):
         self.user_id = user_id
@@ -56,34 +57,33 @@ class LocalAgent:
         self.watchdog_task = None
         self.last_screen_hash = None
         self.idle_count = 0
+        self.streaming = False
+        self.stream_task = None
+        self.last_ai_response = ""
         
-        # Setup download dirs
         self.downloads_dir = Path.home() / "Downloads" / "AntigravityRemote"
         self.downloads_dir.mkdir(parents=True, exist_ok=True)
     
     async def connect(self):
         url = f"{self.server_url}/{self.user_id}"
-        logger.info(f"🔌 Connecting to server...")
+        logger.info("🔌 Connecting to server...")
         
         try:
             self.websocket = await websockets.connect(url)
             
-            # Send authentication
             auth_msg = json.dumps({"auth_token": self.auth_token})
             await self.websocket.send(auth_msg)
             
-            # Wait for strict auth response
             try:
                 response = await asyncio.wait_for(self.websocket.recv(), timeout=10.0)
                 resp = json.loads(response)
                 if "error" in resp:
-                    logger.error(f"❌ Authentication failed: {resp['error']}")
+                    logger.error(f"❌ Auth failed: {resp['error']}")
                     return False
             except asyncio.TimeoutError:
-                 # Legacy server might not send response immediately, assume ok but warn
-                 logger.warning("⚠️ No auth response (legacy server?), assuming connected")
+                logger.warning("⚠️ No auth response, assuming connected")
             
-            logger.info("✅ Authenticated and connected!")
+            logger.info("✅ Connected!")
             return True
             
         except Exception as e:
@@ -91,7 +91,6 @@ class LocalAgent:
             return False
     
     async def send_alert(self, alert_type: str, text: str, include_screenshot: bool = False):
-        """Send alert to server."""
         if not self.websocket:
             return
         
@@ -106,11 +105,65 @@ class LocalAgent:
         
         try:
             await self.websocket.send(json.dumps(alert))
-        except Exception:
+        except:
             pass
     
+    async def send_ai_response(self, text: str):
+        """Send AI response to Telegram (Two-Way Chat)."""
+        if not self.websocket or not text:
+            return
+        
+        try:
+            await self.websocket.send(json.dumps({
+                "type": "ai_response",
+                "text": text
+            }))
+            self.last_ai_response = text
+            logger.info(f"📤 Sent AI response: {text[:50]}...")
+        except Exception as e:
+            logger.error(f"Failed to send AI response: {e}")
+    
+    async def send_progress(self, task: str, percent: int, status: str = ""):
+        """Send progress update to Telegram."""
+        if not self.websocket:
+            return
+        
+        try:
+            await self.websocket.send(json.dumps({
+                "type": "progress",
+                "task": task,
+                "percent": percent,
+                "status": status
+            }))
+        except:
+            pass
+    
+    async def stream_screen(self, fps: int = 2):
+        """Stream screen to server."""
+        logger.info(f"📺 Starting stream at {fps} FPS")
+        delay = 1.0 / fps
+        
+        while self.streaming and self.websocket:
+            try:
+                path = take_screenshot(quality=50, max_width=1280)
+                if path:
+                    with open(path, "rb") as f:
+                        frame_data = base64.b64encode(f.read()).decode()
+                    cleanup_screenshot(path)
+                    
+                    await self.websocket.send(json.dumps({
+                        "type": "stream_frame",
+                        "data": frame_data
+                    }))
+                
+                await asyncio.sleep(delay)
+            except Exception as e:
+                logger.error(f"Stream error: {e}")
+                break
+        
+        logger.info("📺 Stream stopped")
+    
     async def run_watchdog(self):
-        """Background watchdog loop."""
         logger.info("🐕 Watchdog started")
         last_alert_time = 0
         
@@ -132,7 +185,7 @@ class LocalAgent:
                     self.idle_count = 0
                 self.last_screen_hash = current_hash
                 
-                # Try OCR
+                # Try OCR for smart notifications
                 try:
                     import pytesseract
                     from PIL import Image
@@ -174,20 +227,15 @@ class LocalAgent:
         logger.info("🐕 Watchdog stopped")
     
     def process_voice(self, audio_path: Path) -> str:
-        """
-        Transcribe voice file using local Whisper (FREE, no API).
-        Falls back to Google Speech Recognition if Whisper not available.
-        """
-        # Try faster-whisper first (best quality, runs locally)
+        """Transcribe voice using local Whisper."""
+        # Try faster-whisper first
         try:
             from faster_whisper import WhisperModel
             
-            # Use tiny model for speed (can upgrade to base/small for accuracy)
             if not hasattr(self, '_whisper_model'):
-                logger.info("Loading Whisper model (first time, may take a moment)...")
+                logger.info("Loading Whisper model...")
                 self._whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
             
-            # Convert OGG to WAV if needed
             wav_path = audio_path
             if audio_path.suffix.lower() == '.ogg':
                 try:
@@ -195,22 +243,22 @@ class LocalAgent:
                     wav_path = audio_path.with_suffix('.wav')
                     sound = AudioSegment.from_ogg(str(audio_path))
                     sound.export(str(wav_path), format="wav")
-                except Exception:
-                    pass  # Try with OGG directly
+                except:
+                    pass
             
-            segments, info = self._whisper_model.transcribe(str(wav_path), beam_size=5)
-            text = " ".join([segment.text for segment in segments]).strip()
+            segments, _ = self._whisper_model.transcribe(str(wav_path), beam_size=5)
+            text = " ".join([s.text for s in segments]).strip()
             
             if text:
-                logger.info(f"Whisper transcribed: {text[:50]}...")
+                logger.info(f"Transcribed: {text[:50]}...")
                 return text
                 
         except ImportError:
-            logger.debug("faster-whisper not installed, trying fallback...")
+            pass
         except Exception as e:
-            logger.warning(f"Whisper error: {e}, trying fallback...")
+            logger.warning(f"Whisper error: {e}")
         
-        # Fallback to Google Speech Recognition (also free, but less reliable)
+        # Fallback to Google STT
         try:
             import speech_recognition as sr
             from pydub import AudioSegment
@@ -224,15 +272,48 @@ class LocalAgent:
             with sr.AudioFile(str(wav_path)) as source:
                 audio = r.record(source)
                 text = r.recognize_google(audio)
-                logger.info(f"Google STT transcribed: {text[:50]}...")
                 return text
-                
-        except ImportError:
-            logger.warning("Neither faster-whisper nor speech_recognition installed")
-        except Exception as e:
-            logger.error(f"All transcription methods failed: {e}")
+        except:
+            pass
         
         return ""
+    
+    def speak_text(self, text: str):
+        """Text-to-speech using system TTS."""
+        try:
+            import pyttsx3
+            engine = pyttsx3.init()
+            engine.say(text[:500])
+            engine.runAndWait()
+            logger.info("🗣️ Spoke text")
+        except ImportError:
+            # Fallback to Windows built-in
+            try:
+                subprocess.run([
+                    "powershell", "-Command",
+                    f"Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak('{text[:200]}')"
+                ], capture_output=True)
+            except:
+                logger.warning("TTS not available")
+    
+    def get_git_diff(self) -> str:
+        """Get pending git diff."""
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--staged"],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.stdout:
+                return result.stdout[:3500]
+            
+            # Try unstaged diff too
+            result = subprocess.run(
+                ["git", "diff"],
+                capture_output=True, text=True, timeout=10
+            )
+            return result.stdout[:3500] if result.stdout else ""
+        except:
+            return ""
 
     async def handle_command(self, command: dict) -> dict:
         cmd_type = command.get("type")
@@ -241,7 +322,8 @@ class LocalAgent:
         
         try:
             if cmd_type == "screenshot":
-                path = take_screenshot()
+                quality = command.get("quality", 85)
+                path = take_screenshot(quality=quality)
                 if path:
                     with open(path, "rb") as f:
                         result["image"] = base64.b64encode(f.read()).decode()
@@ -258,8 +340,6 @@ class LocalAgent:
                     filename = f"photo_{int(time.time())}.jpg"
                     path = self.downloads_dir / filename
                     path.write_bytes(data)
-                    
-                    # Tell Agent
                     send_to_antigravity(f"I uploaded a photo here: {path}")
                     result["success"] = True
                 except Exception as e:
@@ -272,14 +352,13 @@ class LocalAgent:
                     path = self.downloads_dir / filename
                     path.write_bytes(data)
                     
-                    # Try transcribe
                     text = self.process_voice(path)
                     if text:
-                        send_to_antigravity(f"(Voice Command): {text}")
+                        send_to_antigravity(f"(Voice): {text}")
                         result["text"] = text
                     else:
-                        send_to_antigravity(f"I sent a voice note here: {path}")
-                        result["text"] = "Audio saved (transcription failed)"
+                        send_to_antigravity(f"Voice note: {path}")
+                        result["text"] = "Audio saved"
                     
                     result["success"] = True
                 except Exception as e:
@@ -289,15 +368,14 @@ class LocalAgent:
                 try:
                     data = base64.b64decode(command.get("data", ""))
                     name = sanitize_input(command.get("name", "file"), 100)
-                    path = Path.cwd() / name  # Save to CWD
+                    path = Path.cwd() / name
                     path.write_bytes(data)
-                    
-                    send_to_antigravity(f"I saved a file: {path.absolute()}")
+                    send_to_antigravity(f"File saved: {path.absolute()}")
                     result["path"] = str(path.absolute())
                     result["success"] = True
                 except Exception as e:
                     result["error"] = str(e)
-
+            
             elif cmd_type == "scroll":
                 direction = command.get("direction", "down")
                 clicks = {"up": 25, "down": -25, "top": 500, "bottom": -500}.get(direction, -25)
@@ -338,16 +416,11 @@ class LocalAgent:
                 model = sanitize_input(command.get("model", ""), 100)
                 focus_antigravity()
                 time.sleep(0.5)
-                
-                # Strategy 1: Ctrl + / (Common Cursor shortcut)
                 pyautogui.hotkey('ctrl', '/')
                 time.sleep(0.5)
                 pyautogui.write(model, interval=0.05)
                 time.sleep(0.5)
                 pyautogui.press('enter')
-                
-                # Strategy 2: Just tell the Agent!
-                time.sleep(0.5)
                 send_to_antigravity(f"Please switch model to {model}")
                 result["success"] = True
             
@@ -361,6 +434,32 @@ class LocalAgent:
                     self.watchdog_task = None
                 result["success"] = True
             
+            elif cmd_type == "start_stream":
+                fps = command.get("fps", 2)
+                self.streaming = True
+                if self.stream_task:
+                    self.stream_task.cancel()
+                self.stream_task = asyncio.create_task(self.stream_screen(fps))
+                result["success"] = True
+            
+            elif cmd_type == "stop_stream":
+                self.streaming = False
+                if self.stream_task:
+                    self.stream_task.cancel()
+                    self.stream_task = None
+                result["success"] = True
+            
+            elif cmd_type == "get_diff":
+                diff = self.get_git_diff()
+                result["diff"] = diff
+                result["success"] = True
+            
+            elif cmd_type == "tts":
+                text = command.get("text", "")
+                if text:
+                    self.speak_text(text)
+                result["success"] = True
+            
             elif cmd_type == "sysinfo":
                 import psutil
                 cpu = psutil.cpu_percent(interval=1)
@@ -369,8 +468,7 @@ class LocalAgent:
                 result["success"] = True
             
             elif cmd_type == "files":
-                workspace = os.getcwd()
-                items = os.listdir(workspace)[:20]
+                items = os.listdir(os.getcwd())[:20]
                 result["files"] = "\n".join(f"📄 {i}" for i in items)
                 result["success"] = True
             
@@ -384,15 +482,12 @@ class LocalAgent:
         return result
     
     async def send_heartbeat(self):
-        """Send periodic heartbeat pings to server."""
         while self.running and self.websocket:
             try:
-                await asyncio.sleep(30)  # Every 30 seconds
+                await asyncio.sleep(30)
                 if self.websocket:
                     await self.websocket.send(json.dumps({"type": "ping"}))
-                    logger.debug("💓 Heartbeat sent")
-            except Exception as e:
-                logger.debug(f"Heartbeat error (will reconnect): {e}")
+            except:
                 break
     
     async def run(self):
@@ -407,8 +502,6 @@ class LocalAgent:
                     continue
                 
                 reconnect_delay = 5
-                
-                # Start heartbeat task
                 heartbeat_task = asyncio.create_task(self.send_heartbeat())
                 
                 try:
@@ -416,16 +509,15 @@ class LocalAgent:
                         command = json.loads(message)
                         cmd_type = command.get('type')
                         
-                        # Handle pong (response to our ping)
                         if cmd_type == "pong":
-                            logger.debug("💓 Heartbeat acknowledged")
                             continue
                         
-                        logger.info(f"📥 Received: {cmd_type}")
+                        logger.info(f"📥 {cmd_type}")
                         result = await self.handle_command(command)
                         await self.websocket.send(json.dumps(result))
                 finally:
                     heartbeat_task.cancel()
+                    self.streaming = False
                     
             except websockets.exceptions.ConnectionClosed:
                 logger.warning("Connection closed. Reconnecting...")
@@ -438,11 +530,11 @@ class LocalAgent:
     def stop(self):
         self.running = False
         self.watchdog_enabled = False
+        self.streaming = False
         if self.websocket:
             asyncio.create_task(self.websocket.close())
 
 
 async def run_agent(user_id: str, auth_token: str, server_url: str = None):
-    """Run the secure local agent."""
     agent = LocalAgent(user_id, auth_token, server_url)
     await agent.run()

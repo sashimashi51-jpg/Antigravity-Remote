@@ -1,11 +1,8 @@
 """
-Antigravity Remote Server - v3.3.0
-Fixes: Heartbeat, Command Queue, Voice Transcription, Keep-Alive
-
-Architecture follows backend-dev-guidelines:
-- Layered: Routes → Controllers → Services
-- Proper error handling with logging
-- Async patterns with try-catch
+Antigravity Remote Server - v4.0.0 VIBECODER EDITION
+Features: Live Stream, Two-Way Chat, Code Preview, Scheduled Tasks, 
+          Smart Notifs, Mini Keyboard, Voice Response, Better Screenshots,
+          Progress Bar, Undo Stack
 """
 
 import asyncio
@@ -17,6 +14,7 @@ import json
 import hashlib
 import secrets
 import time
+import io
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Any
 from contextlib import asynccontextmanager
@@ -29,73 +27,47 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 logger.info("=" * 50)
-logger.info("Antigravity Remote Server - v3.3.0")
-logger.info("Features: Heartbeat, Command Queue, Voice Transcription")
+logger.info("Antigravity Remote Server - v4.0.0 VIBECODER EDITION")
 logger.info("=" * 50)
 
-# ============ Configuration (unifiedConfig pattern) ============
+# ============ Configuration ============
 
 class Config:
-    """Centralized configuration - never use os.environ directly."""
     BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     PORT: int = int(os.environ.get("PORT", 10000))
     AUTH_SECRET: str = os.environ.get("AUTH_SECRET", "antigravity-remote-2026")
-    OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
     
-    # Timeouts and limits
-    HEARTBEAT_INTERVAL: int = 30  # seconds
-    HEARTBEAT_TIMEOUT: int = 60   # seconds before considering client dead
-    COMMAND_QUEUE_TTL: int = 300  # 5 minutes
+    HEARTBEAT_INTERVAL: int = 30
+    HEARTBEAT_TIMEOUT: int = 60
+    COMMAND_QUEUE_TTL: int = 300
     COMMAND_QUEUE_MAX_SIZE: int = 50
-    RATE_LIMIT_REQUESTS: int = 30
+    RATE_LIMIT_REQUESTS: int = 60
     RATE_LIMIT_WINDOW: int = 60
     TOKEN_EXPIRY_DAYS: int = 30
+    STREAM_FPS: int = 2
+    UNDO_STACK_SIZE: int = 10
 
 config = Config()
 
 logger.info(f"PORT: {config.PORT}")
-logger.info(f"BOT_TOKEN set: {'Yes' if config.BOT_TOKEN else 'NO!'}")
-logger.info(f"OPENAI_API_KEY set: {'Yes' if config.OPENAI_API_KEY else 'No (voice transcription disabled)'}")
+logger.info(f"BOT_TOKEN: {'SET' if config.BOT_TOKEN else 'MISSING!'}")
 
 try:
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-    from fastapi.responses import JSONResponse
-    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
+    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
     from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
     from telegram.constants import ParseMode
     import uvicorn
-    import httpx  # For Whisper API
+    import httpx
     logger.info("All imports successful!")
 except Exception as e:
     logger.error(f"Import error: {e}")
     sys.exit(1)
 
-# ============ Custom Error Types (async-and-errors.md pattern) ============
-
-class AppError(Exception):
-    """Base application error."""
-    def __init__(self, message: str, code: str = "UNKNOWN", status_code: int = 500):
-        super().__init__(message)
-        self.message = message
-        self.code = code
-        self.status_code = status_code
-
-class ValidationError(AppError):
-    def __init__(self, message: str):
-        super().__init__(message, "VALIDATION_ERROR", 400)
-
-class NotFoundError(AppError):
-    def __init__(self, message: str):
-        super().__init__(message, "NOT_FOUND", 404)
-
-class AuthenticationError(AppError):
-    def __init__(self, message: str):
-        super().__init__(message, "AUTH_FAILED", 401)
-
-# ============ Services Layer ============
+# ============ Services ============
 
 class RateLimiterService:
-    """Rate limiting per user."""
     def __init__(self, max_requests: int, window_seconds: int):
         self.max_requests = max_requests
         self.window = window_seconds
@@ -104,10 +76,8 @@ class RateLimiterService:
     def is_allowed(self, user_id: str) -> bool:
         now = time.time()
         self.requests[user_id] = [t for t in self.requests[user_id] if now - t < self.window]
-        
         if len(self.requests[user_id]) >= self.max_requests:
             return False
-        
         self.requests[user_id].append(now)
         return True
     
@@ -119,46 +89,28 @@ class RateLimiterService:
 
 
 class CommandQueueService:
-    """
-    Queue commands when client is disconnected.
-    Commands are stored with TTL and delivered on reconnection.
-    """
     def __init__(self, max_size: int = 50, ttl_seconds: int = 300):
         self.queues: Dict[str, deque] = defaultdict(deque)
         self.max_size = max_size
         self.ttl = ttl_seconds
     
     def enqueue(self, user_id: str, command: dict) -> bool:
-        """Add command to queue. Returns False if queue is full."""
         self._cleanup_expired(user_id)
-        
         if len(self.queues[user_id]) >= self.max_size:
-            logger.warning(f"Command queue full for user {user_id[-4:]}")
             return False
-        
         command["_queued_at"] = time.time()
         self.queues[user_id].append(command)
-        logger.info(f"Queued command for user {user_id[-4:]}: {command.get('type')}")
         return True
     
     def dequeue_all(self, user_id: str) -> List[dict]:
-        """Get all pending commands for user and clear queue."""
         self._cleanup_expired(user_id)
-        
         commands = list(self.queues[user_id])
         self.queues[user_id].clear()
-        
-        # Remove internal metadata
         for cmd in commands:
             cmd.pop("_queued_at", None)
-        
-        if commands:
-            logger.info(f"Delivering {len(commands)} queued commands to user {user_id[-4:]}")
-        
         return commands
     
     def _cleanup_expired(self, user_id: str):
-        """Remove expired commands."""
         now = time.time()
         self.queues[user_id] = deque(
             cmd for cmd in self.queues[user_id]
@@ -171,56 +123,122 @@ class CommandQueueService:
 
 
 class HeartbeatService:
-    """
-    Track client heartbeats and detect disconnections.
-    Implements ping/pong pattern.
-    """
     def __init__(self, timeout_seconds: int = 60):
         self.last_heartbeat: Dict[str, float] = {}
         self.timeout = timeout_seconds
     
     def record_heartbeat(self, user_id: str):
-        """Record a heartbeat from client."""
         self.last_heartbeat[user_id] = time.time()
     
     def is_alive(self, user_id: str) -> bool:
-        """Check if client is still alive."""
         last = self.last_heartbeat.get(user_id, 0)
         return (time.time() - last) < self.timeout
     
     def remove(self, user_id: str):
-        """Remove client from tracking."""
         self.last_heartbeat.pop(user_id, None)
     
     def get_dead_clients(self, connected_clients: Dict[str, Any]) -> List[str]:
-        """Get list of clients that haven't sent heartbeat in timeout period."""
         now = time.time()
-        dead = []
-        for user_id in connected_clients:
-            last = self.last_heartbeat.get(user_id, 0)
-            if now - last > self.timeout:
-                dead.append(user_id)
-        return dead
+        return [uid for uid in connected_clients if now - self.last_heartbeat.get(uid, 0) > self.timeout]
 
 
-class VoiceTranscriptionService:
-    """
-    Voice transcription now happens LOCALLY on the agent side.
-    Server just relays audio to agent.
-    """
+class SchedulerService:
+    """Scheduled tasks service."""
     def __init__(self):
-        logger.info("Voice transcription: local (faster-whisper on agent)")
+        self.tasks: Dict[str, List[dict]] = defaultdict(list)
     
-    async def transcribe(self, audio_data: bytes, format: str = "ogg") -> Optional[str]:
-        """
-        Note: Transcription now happens on the agent side using local Whisper.
-        This method is kept for API compatibility but returns None.
-        """
-        return None  # Agent will transcribe locally
+    def add_task(self, user_id: str, time_str: str, command: str) -> bool:
+        """Add scheduled task. time_str format: '9:00' or '14:30'"""
+        try:
+            hour, minute = map(int, time_str.split(':'))
+            self.tasks[user_id].append({
+                "hour": hour,
+                "minute": minute,
+                "command": command,
+                "last_run": None
+            })
+            return True
+        except:
+            return False
+    
+    def get_due_tasks(self, user_id: str) -> List[str]:
+        """Get tasks that are due now."""
+        now = datetime.now()
+        due = []
+        for task in self.tasks.get(user_id, []):
+            if task["hour"] == now.hour and task["minute"] == now.minute:
+                if task["last_run"] != now.strftime("%Y-%m-%d %H:%M"):
+                    task["last_run"] = now.strftime("%Y-%m-%d %H:%M")
+                    due.append(task["command"])
+        return due
+    
+    def list_tasks(self, user_id: str) -> List[dict]:
+        return self.tasks.get(user_id, [])
+    
+    def clear_tasks(self, user_id: str):
+        self.tasks[user_id] = []
+
+
+class UndoStackService:
+    """Undo stack for multiple undos."""
+    def __init__(self, max_size: int = 10):
+        self.stacks: Dict[str, deque] = defaultdict(lambda: deque(maxlen=max_size))
+    
+    def push(self, user_id: str, action: str):
+        self.stacks[user_id].append({"action": action, "time": time.time()})
+    
+    def get_stack(self, user_id: str) -> List[dict]:
+        return list(self.stacks[user_id])
+    
+    def clear(self, user_id: str):
+        self.stacks[user_id].clear()
+
+
+class LiveStreamService:
+    """Live screen streaming service."""
+    def __init__(self):
+        self.frames: Dict[str, bytes] = {}
+        self.last_update: Dict[str, float] = {}
+        self.streaming: Dict[str, bool] = {}
+    
+    def update_frame(self, user_id: str, frame_data: bytes):
+        self.frames[user_id] = frame_data
+        self.last_update[user_id] = time.time()
+    
+    def get_frame(self, user_id: str) -> Optional[bytes]:
+        return self.frames.get(user_id)
+    
+    def start_stream(self, user_id: str):
+        self.streaming[user_id] = True
+    
+    def stop_stream(self, user_id: str):
+        self.streaming[user_id] = False
+    
+    def is_streaming(self, user_id: str) -> bool:
+        return self.streaming.get(user_id, False)
+
+
+class ProgressService:
+    """Track task progress."""
+    def __init__(self):
+        self.progress: Dict[str, dict] = {}
+    
+    def update(self, user_id: str, task: str, percent: int, status: str = ""):
+        self.progress[user_id] = {
+            "task": task,
+            "percent": min(100, max(0, percent)),
+            "status": status,
+            "updated": time.time()
+        }
+    
+    def get(self, user_id: str) -> Optional[dict]:
+        return self.progress.get(user_id)
+    
+    def clear(self, user_id: str):
+        self.progress.pop(user_id, None)
 
 
 class AuditLoggerService:
-    """Audit logging for commands."""
     def __init__(self, max_entries: int = 1000):
         self.logs: list = []
         self.max_entries = max_entries
@@ -235,31 +253,20 @@ class AuditLoggerService:
         self.logs.append(entry)
         if len(self.logs) > self.max_entries:
             self.logs = self.logs[-self.max_entries:]
-        logger.info(f"AUDIT: {entry['user_id']} - {action}")
 
-
-# ============ Auth Service ============
 
 class AuthService:
-    """Authentication token generation and validation."""
-    
     @staticmethod
     def generate_token(user_id: str) -> tuple[str, int]:
-        """Generate auth token with expiry timestamp."""
         issue_time = int(time.time())
         expires_at = issue_time + (config.TOKEN_EXPIRY_DAYS * 86400)
-        
         data = f"{user_id}:{config.AUTH_SECRET}:{issue_time}"
         token = hashlib.sha256(data.encode()).hexdigest()[:32]
-        
         return token, expires_at
     
     @staticmethod
     def validate_token(user_id: str, token: str) -> bool:
-        """Validate auth token - accepts tokens from last 30 days."""
         current_time = int(time.time())
-        
-        # Check tokens from the last 30 days
         for days_ago in range(config.TOKEN_EXPIRY_DAYS + 1):
             for hour in range(0, 24, 6):
                 test_time = current_time - (days_ago * 86400) - (hour * 3600)
@@ -267,29 +274,24 @@ class AuthService:
                 expected = hashlib.sha256(data.encode()).hexdigest()[:32]
                 if secrets.compare_digest(token, expected):
                     return True
-        
-        # Accept legacy static tokens
         legacy_data = f"{user_id}:{config.AUTH_SECRET}"
         legacy_token = hashlib.sha256(legacy_data.encode()).hexdigest()[:32]
-        if secrets.compare_digest(token, legacy_token):
-            return True
-        
-        return False
+        return secrets.compare_digest(token, legacy_token)
 
 
-# ============ Utility Functions ============
+# ============ Utilities ============
 
 def sanitize_input(text: str, max_length: int = 4000) -> str:
-    """Sanitize user input."""
     if not text:
         return ""
     text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
     return text[:max_length]
 
 
-def safe_error_message(error: Exception) -> str:
-    """Return generic error message."""
-    return "An error occurred. Please try again."
+def make_progress_bar(percent: int, width: int = 10) -> str:
+    filled = int(width * percent / 100)
+    empty = width - filled
+    return f"[{'█' * filled}{'░' * empty}] {percent}%"
 
 
 # ============ Initialize Services ============
@@ -297,7 +299,10 @@ def safe_error_message(error: Exception) -> str:
 rate_limiter = RateLimiterService(config.RATE_LIMIT_REQUESTS, config.RATE_LIMIT_WINDOW)
 command_queue = CommandQueueService(config.COMMAND_QUEUE_MAX_SIZE, config.COMMAND_QUEUE_TTL)
 heartbeat_service = HeartbeatService(config.HEARTBEAT_TIMEOUT)
-voice_service = VoiceTranscriptionService(config.OPENAI_API_KEY)
+scheduler = SchedulerService()
+undo_stack = UndoStackService(config.UNDO_STACK_SIZE)
+live_stream = LiveStreamService()
+progress_service = ProgressService()
 audit_logger = AuditLoggerService()
 auth_service = AuthService()
 
@@ -305,93 +310,148 @@ auth_service = AuthService()
 connected_clients: Dict[str, WebSocket] = {}
 pending_responses: Dict[str, dict] = {}
 user_state: Dict[str, dict] = {}
+ai_responses: Dict[str, str] = {}  # Store last AI response per user
 bot_application = None
 
-# ============ FastAPI App ============
+# ============ FastAPI ============
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("FastAPI starting (v3.3.0)...")
+    logger.info("FastAPI v4.0 starting...")
     
-    # Background tasks
     async def heartbeat_monitor():
-        """Monitor client heartbeats and cleanup dead connections."""
         while True:
             await asyncio.sleep(config.HEARTBEAT_INTERVAL)
             try:
                 dead_clients = heartbeat_service.get_dead_clients(connected_clients)
                 for user_id in dead_clients:
-                    logger.warning(f"Client {user_id[-4:]} timed out (no heartbeat)")
                     ws = connected_clients.pop(user_id, None)
                     heartbeat_service.remove(user_id)
                     if ws:
                         try:
-                            await ws.close(code=4000, reason="Heartbeat timeout")
+                            await ws.close(code=4000)
                         except:
                             pass
             except Exception as e:
-                logger.error(f"Heartbeat monitor error: {e}")
+                logger.error(f"Heartbeat error: {e}")
     
-    async def keep_alive_self():
-        """Keep server warm by pinging itself (prevents Render cold start)."""
+    async def scheduler_task():
         while True:
-            await asyncio.sleep(600)  # Every 10 minutes
+            await asyncio.sleep(60)  # Check every minute
+            try:
+                for user_id in list(connected_clients.keys()):
+                    due_tasks = scheduler.get_due_tasks(user_id)
+                    for task_cmd in due_tasks:
+                        await send_cmd(user_id, {"type": "relay", "text": task_cmd})
+                        if bot_application:
+                            try:
+                                await bot_application.bot.send_message(
+                                    chat_id=int(user_id),
+                                    text=f"⏰ Scheduled task running:\n`{task_cmd}`",
+                                    parse_mode=ParseMode.MARKDOWN
+                                )
+                            except:
+                                pass
+            except Exception as e:
+                logger.error(f"Scheduler error: {e}")
+    
+    async def keep_alive():
+        while True:
+            await asyncio.sleep(600)
             try:
                 async with httpx.AsyncClient() as client:
                     await client.get(f"http://localhost:{config.PORT}/health", timeout=5.0)
-                    logger.debug("Keep-alive ping successful")
-            except Exception as e:
-                logger.debug(f"Keep-alive ping failed (normal on startup): {e}")
+            except:
+                pass
     
-    # Start background tasks
     asyncio.create_task(heartbeat_monitor())
-    asyncio.create_task(keep_alive_self())
+    asyncio.create_task(scheduler_task())
+    asyncio.create_task(keep_alive())
     
     yield
     logger.info("FastAPI shutting down...")
 
-app = FastAPI(title="Antigravity Remote (v3.3.0)", lifespan=lifespan)
+app = FastAPI(title="Antigravity Remote v4.0", lifespan=lifespan)
 
 @app.get("/")
 async def root():
     return {
         "status": "online",
-        "version": "3.3.0",
+        "version": "4.0.0",
         "clients": len(connected_clients),
-        "features": ["heartbeat", "command_queue", "voice_transcription"]
+        "features": ["live_stream", "two_way_chat", "scheduled_tasks", "undo_stack", "progress_bar"]
     }
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "ok"}
 
-@app.get("/stats")
-async def stats():
-    """Server statistics endpoint."""
-    return {
-        "connected_clients": len(connected_clients),
-        "queued_commands": sum(command_queue.get_queue_size(uid) for uid in command_queue.queues),
-        "uptime": "active"
-    }
+@app.get("/stream/{user_id}")
+async def stream_page(user_id: str):
+    """HTML page for live streaming."""
+    return HTMLResponse(f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Antigravity Live Stream</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body {{ margin: 0; padding: 20px; background: #1a1a2e; color: white; font-family: system-ui; }}
+            h1 {{ color: #00d4ff; margin: 0 0 20px 0; }}
+            #stream {{ max-width: 100%; border: 2px solid #00d4ff; border-radius: 10px; }}
+            .info {{ color: #888; margin-top: 10px; }}
+            .status {{ color: #00ff88; }}
+        </style>
+    </head>
+    <body>
+        <h1>🔴 Antigravity Live</h1>
+        <img id="stream" src="/stream/{user_id}/frame" alt="Loading...">
+        <p class="info">Refreshing every 500ms | <span class="status" id="status">Connecting...</span></p>
+        <script>
+            const img = document.getElementById('stream');
+            const status = document.getElementById('status');
+            let errors = 0;
+            setInterval(() => {{
+                const newImg = new Image();
+                newImg.onload = () => {{
+                    img.src = newImg.src;
+                    status.textContent = 'Connected';
+                    errors = 0;
+                }};
+                newImg.onerror = () => {{
+                    errors++;
+                    status.textContent = errors > 3 ? 'Disconnected' : 'Buffering...';
+                }};
+                newImg.src = '/stream/{user_id}/frame?' + Date.now();
+            }}, 500);
+        </script>
+    </body>
+    </html>
+    """)
+
+@app.get("/stream/{user_id}/frame")
+async def stream_frame(user_id: str):
+    """Get latest frame for streaming."""
+    frame = live_stream.get_frame(user_id)
+    if frame:
+        return StreamingResponse(io.BytesIO(frame), media_type="image/jpeg")
+    # Return placeholder image
+    return JSONResponse({"error": "No stream"}, status_code=404)
 
 @app.websocket("/ws/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, user_id: str):
     await websocket.accept()
     
-    # Wait for auth message
     try:
         auth_data = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
         auth = json.loads(auth_data)
         auth_token = auth.get("auth_token", "")
         
-        # Validate
         if not auth_service.validate_token(user_id, auth_token):
-            audit_logger.log(user_id, "AUTH_FAILED", "Invalid token")
             await websocket.send_text(json.dumps({"error": "Authentication failed"}))
             await websocket.close(code=4001)
             return
         
-        # Send success response
         await websocket.send_text(json.dumps({"status": "authenticated"}))
         audit_logger.log(user_id, "CONNECTED")
         
@@ -402,7 +462,6 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
         await websocket.close(code=4003)
         return
     
-    # Register client
     connected_clients[user_id] = websocket
     heartbeat_service.record_heartbeat(user_id)
     
@@ -417,8 +476,6 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
     if user_id not in user_state:
         user_state[user_id] = {"paused": False, "locked": False}
     
-    logger.info(f"Client authenticated: {user_id[-4:]}")
-    
     try:
         while True:
             data = await websocket.receive_text()
@@ -426,13 +483,35 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
             msg_type = msg.get("type")
             msg_id = msg.get("message_id")
             
-            # Handle heartbeat (ping/pong)
             if msg_type == "ping":
                 heartbeat_service.record_heartbeat(user_id)
                 await websocket.send_text(json.dumps({"type": "pong"}))
                 continue
             
-            # Handle alerts from agent
+            # Handle AI response (Two-Way Chat)
+            if msg_type == "ai_response":
+                ai_responses[user_id] = msg.get("text", "")
+                await send_ai_response_to_telegram(user_id, msg.get("text", ""))
+                continue
+            
+            # Handle stream frame
+            if msg_type == "stream_frame":
+                frame_data = base64.b64decode(msg.get("data", ""))
+                live_stream.update_frame(user_id, frame_data)
+                continue
+            
+            # Handle progress update
+            if msg_type == "progress":
+                progress_service.update(
+                    user_id,
+                    msg.get("task", "Working..."),
+                    msg.get("percent", 0),
+                    msg.get("status", "")
+                )
+                await send_progress_to_telegram(user_id)
+                continue
+            
+            # Handle alert
             if msg_type == "alert":
                 await handle_agent_alert(user_id, msg)
                 continue
@@ -445,14 +524,64 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
     except WebSocketDisconnect:
         audit_logger.log(user_id, "DISCONNECTED")
     except Exception as e:
-        logger.error(f"WebSocket error for {user_id[-4:]}: {e}")
+        logger.error(f"WebSocket error: {e}")
     finally:
         connected_clients.pop(user_id, None)
         heartbeat_service.remove(user_id)
+        live_stream.stop_stream(user_id)
+
+
+async def send_ai_response_to_telegram(user_id: str, text: str):
+    """Send AI response back to Telegram (Two-Way Chat)."""
+    global bot_application
+    if not bot_application or not text:
+        return
+    
+    try:
+        # Truncate long responses
+        if len(text) > 4000:
+            text = text[:4000] + "... (truncated)"
+        
+        keyboard = [[
+            InlineKeyboardButton("✅ Accept", callback_data="q_accept"),
+            InlineKeyboardButton("❌ Reject", callback_data="q_reject"),
+        ], [
+            InlineKeyboardButton("📸 Screenshot", callback_data="q_ss"),
+            InlineKeyboardButton("🗣️ Listen", callback_data="q_tts"),
+        ]]
+        
+        await bot_application.bot.send_message(
+            chat_id=int(user_id),
+            text=f"🤖 *AI Response:*\n\n{sanitize_input(text)}",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as e:
+        logger.error(f"Error sending AI response: {e}")
+
+
+async def send_progress_to_telegram(user_id: str):
+    """Send progress update to Telegram."""
+    global bot_application
+    if not bot_application:
+        return
+    
+    progress = progress_service.get(user_id)
+    if not progress:
+        return
+    
+    try:
+        bar = make_progress_bar(progress["percent"])
+        await bot_application.bot.send_message(
+            chat_id=int(user_id),
+            text=f"📊 *{progress['task']}*\n{bar}\n{progress.get('status', '')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logger.error(f"Progress send error: {e}")
 
 
 async def handle_agent_alert(user_id: str, msg: dict):
-    """Handle alerts from local agent (watchdog detections)."""
     global bot_application
     if not bot_application:
         return
@@ -461,32 +590,39 @@ async def handle_agent_alert(user_id: str, msg: dict):
         text = sanitize_input(msg.get("text", "Alert"))
         image = msg.get("image")
         
+        # Smart notification with action buttons
+        keyboard = [[
+            InlineKeyboardButton("✅ Accept", callback_data="q_accept"),
+            InlineKeyboardButton("❌ Reject", callback_data="q_reject"),
+        ]]
+        
         if image:
             await bot_application.bot.send_photo(
-                chat_id=int(user_id), photo=base64.b64decode(image),
-                caption=text, parse_mode=ParseMode.MARKDOWN
+                chat_id=int(user_id), 
+                photo=base64.b64decode(image),
+                caption=text, 
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup(keyboard)
             )
         else:
             await bot_application.bot.send_message(
-                chat_id=int(user_id), text=text, parse_mode=ParseMode.MARKDOWN
+                chat_id=int(user_id), 
+                text=text, 
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup(keyboard)
             )
     except Exception as e:
-        logger.error(f"Alert error: {safe_error_message(e)}")
+        logger.error(f"Alert error: {e}")
 
 
 async def send_cmd(user_id: str, cmd: dict, timeout: float = 30.0) -> Optional[dict]:
-    """Send command to client. Queue if disconnected."""
-    
-    # Rate limit check
     if not rate_limiter.is_allowed(user_id):
         return {"error": "rate_limited", "wait": rate_limiter.get_wait_time(user_id)}
     
-    # If client not connected, queue the command
     if user_id not in connected_clients:
         if command_queue.enqueue(user_id, cmd):
             return {"queued": True, "queue_size": command_queue.get_queue_size(user_id)}
-        else:
-            return {"error": "queue_full"}
+        return {"error": "queue_full"}
     
     ws = connected_clients[user_id]
     msg_id = f"{user_id}_{datetime.utcnow().timestamp()}"
@@ -515,10 +651,17 @@ def get_user_state(uid: str) -> dict:
 async def check_rate_limit(update: Update) -> bool:
     uid = str(update.effective_user.id)
     if not rate_limiter.is_allowed(uid):
-        wait = rate_limiter.get_wait_time(uid)
-        await update.message.reply_text(f"⏳ Rate limited. Wait {wait}s")
+        await update.message.reply_text(f"⏳ Rate limited. Wait {rate_limiter.get_wait_time(uid)}s")
         return False
     return True
+
+
+# Mini Keyboard (persistent reply keyboard)
+def get_mini_keyboard():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("📸 Status"), KeyboardButton("✅ Accept"), KeyboardButton("❌ Reject")],
+        [KeyboardButton("⬆️ Scroll Up"), KeyboardButton("⬇️ Scroll Down"), KeyboardButton("↩️ Undo")],
+    ], resize_keyboard=True, is_persistent=True)
 
 
 async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -527,7 +670,6 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     
     uid = str(update.effective_user.id)
     
-    # Connection status
     if uid in connected_clients:
         status = "🟢 Connected"
     elif command_queue.get_queue_size(uid) > 0:
@@ -535,26 +677,25 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         status = "🔴 Not connected"
     
-    # Generate auth token
     auth_token, expires_at = auth_service.generate_token(uid)
     expiry_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d")
     
-    audit_logger.log(uid, "START")
-    
     await update.message.reply_text(
-        f"🔐 *Antigravity Remote v3.3*\n\n"
+        f"🚀 *Antigravity Remote v4.0*\n"
+        f"_The Vibecoder's Best Friend_\n\n"
         f"ID: `{uid}`\n"
         f"Status: {status}\n"
-        f"Auth Token: `{auth_token}`\n"
+        f"Token: `{auth_token}`\n"
         f"Expires: {expiry_date}\n\n"
-        f"*New in v3.3:*\n"
-        f"• 💓 Heartbeat (better connection)\n"
-        f"• 📦 Command Queue (offline support)\n"
-        f"• 🎙️ Whisper Voice (reliable transcription)\n\n"
-        f"*Setup:*\n"
-        f"`pip install antigravity-remote`\n"
-        f"`antigravity-remote --register`",
-        parse_mode=ParseMode.MARKDOWN
+        f"*NEW in v4.0:*\n"
+        f"📺 /stream - Live screen view\n"
+        f"💬 Two-way chat with AI\n"
+        f"📋 /diff - Preview code changes\n"
+        f"⏰ /schedule - Automated tasks\n"
+        f"🔄 /undo N - Undo N changes\n\n"
+        f"`pip install antigravity-remote`",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=get_mini_keyboard()
     )
 
 
@@ -565,23 +706,148 @@ async def status_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     if uid not in connected_clients:
         queued = command_queue.get_queue_size(uid)
-        if queued > 0:
-            await update.message.reply_text(f"🟡 Offline ({queued} commands queued)")
-        else:
-            await update.message.reply_text(f"🔴 Not connected\nID: `{uid}`", parse_mode=ParseMode.MARKDOWN)
+        msg = f"🔴 Offline" + (f" ({queued} queued)" if queued > 0 else "")
+        await update.message.reply_text(msg, reply_markup=get_mini_keyboard())
         return
     
-    audit_logger.log(uid, "STATUS")
     msg = await update.message.reply_text("📸 Capturing...")
-    
-    resp = await send_cmd(uid, {"type": "screenshot"})
-    if resp and resp.get("queued"):
-        await msg.edit_text(f"📦 Command queued (you're offline)")
-    elif resp and resp.get("image"):
-        await ctx.bot.send_photo(chat_id=update.effective_chat.id, photo=base64.b64decode(resp["image"]))
+    resp = await send_cmd(uid, {"type": "screenshot", "quality": 70})
+    if resp and resp.get("image"):
+        # Better screenshot with inline buttons
+        keyboard = [[
+            InlineKeyboardButton("✅ Accept", callback_data="q_accept"),
+            InlineKeyboardButton("❌ Reject", callback_data="q_reject"),
+        ], [
+            InlineKeyboardButton("🔄 Refresh", callback_data="q_ss"),
+            InlineKeyboardButton("📺 Live", callback_data="q_stream"),
+        ]]
+        await ctx.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=base64.b64decode(resp["image"]),
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         await msg.delete()
     else:
         await msg.edit_text("❌ Failed")
+
+
+async def stream_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Start live streaming."""
+    if not await check_rate_limit(update):
+        return
+    
+    uid = str(update.effective_user.id)
+    if uid not in connected_clients:
+        await update.message.reply_text("🔴 Not connected")
+        return
+    
+    # Start streaming on agent
+    await send_cmd(uid, {"type": "start_stream", "fps": config.STREAM_FPS})
+    live_stream.start_stream(uid)
+    
+    # Get the URL
+    # Note: Render URL format
+    host = os.environ.get("RENDER_EXTERNAL_URL", f"http://localhost:{config.PORT}")
+    stream_url = f"{host}/stream/{uid}"
+    
+    keyboard = [[InlineKeyboardButton("📺 Watch Live", url=stream_url)]]
+    await update.message.reply_text(
+        f"📺 *Live Stream Started!*\n\nOpen in browser:\n{stream_url}\n\n`/stream stop` to end",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def diff_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Preview pending code changes."""
+    if not await check_rate_limit(update):
+        return
+    
+    uid = str(update.effective_user.id)
+    if uid not in connected_clients:
+        await update.message.reply_text("🔴 Not connected")
+        return
+    
+    msg = await update.message.reply_text("📋 Getting diff...")
+    resp = await send_cmd(uid, {"type": "get_diff"})
+    
+    if resp and resp.get("diff"):
+        diff_text = sanitize_input(resp["diff"], 3500)
+        keyboard = [[
+            InlineKeyboardButton("✅ Accept All", callback_data="q_accept"),
+            InlineKeyboardButton("❌ Reject All", callback_data="q_reject"),
+        ]]
+        await msg.edit_text(
+            f"📋 *Pending Changes:*\n```diff\n{diff_text}\n```",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await msg.edit_text("📋 No pending changes")
+
+
+async def schedule_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Manage scheduled tasks."""
+    if not await check_rate_limit(update):
+        return
+    
+    uid = str(update.effective_user.id)
+    
+    if not ctx.args:
+        # List tasks
+        tasks = scheduler.list_tasks(uid)
+        if not tasks:
+            await update.message.reply_text(
+                "⏰ *Scheduled Tasks*\n\nNo tasks.\n\n"
+                "Usage:\n`/schedule 9:00 Check emails`\n`/schedule clear`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            task_list = "\n".join([f"• {t['hour']:02d}:{t['minute']:02d} - {t['command']}" for t in tasks])
+            await update.message.reply_text(
+                f"⏰ *Scheduled Tasks*\n\n{task_list}\n\n`/schedule clear` to remove all",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        return
+    
+    if ctx.args[0] == "clear":
+        scheduler.clear_tasks(uid)
+        await update.message.reply_text("⏰ All tasks cleared")
+        return
+    
+    # Add task: /schedule 9:00 Check emails and summarize
+    time_str = ctx.args[0]
+    command = " ".join(ctx.args[1:])
+    
+    if scheduler.add_task(uid, time_str, command):
+        await update.message.reply_text(f"⏰ Scheduled: `{time_str}` → {command}", parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text("❌ Invalid time format. Use HH:MM (e.g., 9:00 or 14:30)")
+
+
+async def undo_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Undo multiple changes."""
+    if not await check_rate_limit(update):
+        return
+    
+    uid = str(update.effective_user.id)
+    if uid not in connected_clients:
+        await update.message.reply_text("🔴 Not connected")
+        return
+    
+    count = 1
+    if ctx.args:
+        try:
+            count = min(10, max(1, int(ctx.args[0])))
+        except:
+            pass
+    
+    # Record in undo stack and send
+    for i in range(count):
+        undo_stack.push(uid, f"undo_{i}")
+        await send_cmd(uid, {"type": "undo"})
+    
+    await update.message.reply_text(f"↩️ Undid {count} change(s)")
 
 
 async def scroll_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -594,9 +860,8 @@ async def scroll_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     direction = sanitize_input(ctx.args[0] if ctx.args else "down", 10)
     if direction not in ["up", "down", "top", "bottom"]:
         direction = "down"
-    audit_logger.log(uid, "SCROLL", direction)
-    resp = await send_cmd(uid, {"type": "scroll", "direction": direction})
-    await update.message.reply_text(f"📜 Scrolled {direction}" if resp else "❌ Failed")
+    await send_cmd(uid, {"type": "scroll", "direction": direction})
+    await update.message.reply_text(f"📜 Scrolled {direction}")
 
 
 async def accept_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -606,9 +871,9 @@ async def accept_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if uid not in connected_clients:
         await update.message.reply_text("🔴 Not connected")
         return
-    audit_logger.log(uid, "ACCEPT")
-    resp = await send_cmd(uid, {"type": "accept"})
-    await update.message.reply_text("✅ Accept sent" if resp else "❌ Failed")
+    undo_stack.push(uid, "accept")
+    await send_cmd(uid, {"type": "accept"})
+    await update.message.reply_text("✅ Accepted")
 
 
 async def reject_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -618,86 +883,52 @@ async def reject_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if uid not in connected_clients:
         await update.message.reply_text("🔴 Not connected")
         return
-    audit_logger.log(uid, "REJECT")
-    resp = await send_cmd(uid, {"type": "reject"})
-    await update.message.reply_text("❌ Reject sent" if resp else "❌ Failed")
+    await send_cmd(uid, {"type": "reject"})
+    await update.message.reply_text("❌ Rejected")
 
 
-async def undo_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def tts_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Text-to-speech: read last AI response."""
     if not await check_rate_limit(update):
         return
+    
     uid = str(update.effective_user.id)
-    if uid not in connected_clients:
+    text = ai_responses.get(uid, "")
+    
+    if not text:
+        await update.message.reply_text("🗣️ No recent AI response to read")
+        return
+    
+    # Use agent for TTS (it has local TTS capability)
+    if uid in connected_clients:
+        await send_cmd(uid, {"type": "tts", "text": text[:500]})
+        await update.message.reply_text("🗣️ Speaking...")
+    else:
         await update.message.reply_text("🔴 Not connected")
-        return
-    audit_logger.log(uid, "UNDO")
-    resp = await send_cmd(uid, {"type": "undo"})
-    await update.message.reply_text("↩️ Undo sent" if resp else "❌ Failed")
-
-
-async def cancel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await check_rate_limit(update):
-        return
-    uid = str(update.effective_user.id)
-    if uid not in connected_clients:
-        await update.message.reply_text("🔴 Not connected")
-        return
-    audit_logger.log(uid, "CANCEL")
-    resp = await send_cmd(uid, {"type": "cancel"})
-    await update.message.reply_text("🛑 Cancel sent" if resp else "❌ Failed")
-
-
-async def key_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await check_rate_limit(update):
-        return
-    uid = str(update.effective_user.id)
-    if uid not in connected_clients:
-        await update.message.reply_text("🔴 Not connected")
-        return
-    if not ctx.args:
-        await update.message.reply_text("Usage: /key ctrl+s")
-        return
-    combo = sanitize_input(ctx.args[0], 50)
-    if not re.match(r'^[a-z0-9+]+$', combo.lower()):
-        await update.message.reply_text("Invalid key combo")
-        return
-    audit_logger.log(uid, "KEY", combo)
-    resp = await send_cmd(uid, {"type": "key", "combo": combo})
-    await update.message.reply_text(f"⌨️ Sent: `{combo}`" if resp else "❌ Failed", parse_mode=ParseMode.MARKDOWN)
 
 
 async def quick_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await check_rate_limit(update):
         return
     keyboard = [
-        [InlineKeyboardButton("✅ Yes", callback_data="q_yes"), InlineKeyboardButton("❌ No", callback_data="q_no")],
-        [InlineKeyboardButton("▶️ Proceed", callback_data="q_proceed"), InlineKeyboardButton("⏹️ Cancel", callback_data="q_cancel")],
-        [InlineKeyboardButton("📸 Screenshot", callback_data="q_ss")],
+        [InlineKeyboardButton("✅ Accept", callback_data="q_accept"), 
+         InlineKeyboardButton("❌ Reject", callback_data="q_reject")],
+        [InlineKeyboardButton("📸 Screenshot", callback_data="q_ss"),
+         InlineKeyboardButton("📺 Stream", callback_data="q_stream")],
+        [InlineKeyboardButton("📋 Diff", callback_data="q_diff"),
+         InlineKeyboardButton("↩️ Undo", callback_data="q_undo")],
     ]
-    await update.message.reply_text("⚡ *Quick:*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text("⚡ Quick Actions:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
-MODELS = ["Gemini 3 Pro", "Gemini 3 Flash", "Claude Sonnet 4.5", "Claude Opus 4.5", "GPT-OSS 120B"]
+MODELS = ["Gemini 3 Pro", "Gemini 3 Flash", "Claude Sonnet 4.5", "GPT-OSS 120B"]
 
 
 async def model_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await check_rate_limit(update):
         return
     keyboard = [[InlineKeyboardButton(m, callback_data=f"m_{m}")] for m in MODELS]
-    await update.message.reply_text("🤖 *Select model:*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
-
-
-async def summary_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await check_rate_limit(update):
-        return
-    uid = str(update.effective_user.id)
-    if uid not in connected_clients:
-        await update.message.reply_text("🔴 Not connected")
-        return
-    audit_logger.log(uid, "SUMMARY")
-    await send_cmd(uid, {"type": "relay", "text": "Please give me a brief summary of what you just did."})
-    keyboard = [[InlineKeyboardButton("📸 Get Result", callback_data="q_ss")]]
-    await update.message.reply_text("📝 Summary requested!", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("🤖 Select model:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def watchdog_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -709,63 +940,24 @@ async def watchdog_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     
     if ctx.args and ctx.args[0].lower() == "off":
-        audit_logger.log(uid, "WATCHDOG_OFF")
         await send_cmd(uid, {"type": "watchdog", "enabled": False})
         await update.message.reply_text("🐕 Watchdog stopped")
         return
     
-    audit_logger.log(uid, "WATCHDOG_ON")
     await send_cmd(uid, {"type": "watchdog", "enabled": True})
-    await update.message.reply_text(
-        "🐕 *Watchdog started!*\n\n"
-        "Alerts for:\n• 🚨 Approval needed\n• ✅ Task complete\n• ⚠️ Errors\n• 💤 Idle\n\n"
-        "`/watchdog off` to stop",
-        parse_mode=ParseMode.MARKDOWN
-    )
+    await update.message.reply_text("🐕 Watchdog started! You'll get alerts when AI needs input.")
 
 
 async def pause_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     get_user_state(uid)["paused"] = True
-    audit_logger.log(uid, "PAUSE")
-    await update.message.reply_text("⏸️ Paused. /resume to continue.")
+    await update.message.reply_text("⏸️ Paused")
 
 
 async def resume_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     get_user_state(uid)["paused"] = False
-    audit_logger.log(uid, "RESUME")
-    await update.message.reply_text("▶️ Resumed!")
-
-
-async def sysinfo_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await check_rate_limit(update):
-        return
-    uid = str(update.effective_user.id)
-    if uid not in connected_clients:
-        await update.message.reply_text("🔴 Not connected")
-        return
-    audit_logger.log(uid, "SYSINFO")
-    resp = await send_cmd(uid, {"type": "sysinfo"})
-    if resp and resp.get("info"):
-        await update.message.reply_text(f"⚙️ *System:*\n```\n{resp['info']}\n```", parse_mode=ParseMode.MARKDOWN)
-    else:
-        await update.message.reply_text("❌ Failed")
-
-
-async def files_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await check_rate_limit(update):
-        return
-    uid = str(update.effective_user.id)
-    if uid not in connected_clients:
-        await update.message.reply_text("🔴 Not connected")
-        return
-    audit_logger.log(uid, "FILES")
-    resp = await send_cmd(uid, {"type": "files"})
-    if resp and resp.get("files"):
-        await update.message.reply_text(f"📂 *Files:*\n{sanitize_input(resp['files'])}", parse_mode=ParseMode.MARKDOWN)
-    else:
-        await update.message.reply_text("❌ Failed")
+    await update.message.reply_text("▶️ Resumed")
 
 
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -781,21 +973,44 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     
     data = query.data
-    audit_logger.log(uid, "BUTTON", data)
     
     if data == "q_ss":
-        resp = await send_cmd(uid, {"type": "screenshot"})
+        resp = await send_cmd(uid, {"type": "screenshot", "quality": 70})
         if resp and resp.get("image"):
             await ctx.bot.send_photo(chat_id=update.effective_chat.id, photo=base64.b64decode(resp["image"]))
+    elif data == "q_accept":
+        undo_stack.push(uid, "accept")
+        await send_cmd(uid, {"type": "accept"})
+        await query.message.reply_text("✅ Accepted")
+    elif data == "q_reject":
+        await send_cmd(uid, {"type": "reject"})
+        await query.message.reply_text("❌ Rejected")
+    elif data == "q_undo":
+        await send_cmd(uid, {"type": "undo"})
+        await query.message.reply_text("↩️ Undone")
+    elif data == "q_stream":
+        host = os.environ.get("RENDER_EXTERNAL_URL", f"http://localhost:{config.PORT}")
+        await send_cmd(uid, {"type": "start_stream", "fps": 2})
+        live_stream.start_stream(uid)
+        await query.message.reply_text(f"📺 Stream: {host}/stream/{uid}")
+    elif data == "q_diff":
+        resp = await send_cmd(uid, {"type": "get_diff"})
+        if resp and resp.get("diff"):
+            await query.message.reply_text(f"```diff\n{sanitize_input(resp['diff'], 3500)}\n```", parse_mode=ParseMode.MARKDOWN)
+        else:
+            await query.message.reply_text("📋 No pending changes")
+    elif data == "q_tts":
+        text = ai_responses.get(uid, "")
+        if text:
+            await send_cmd(uid, {"type": "tts", "text": text[:500]})
+            await query.message.reply_text("🗣️ Speaking...")
     elif data.startswith("q_"):
         text = data[2:].capitalize()
         await send_cmd(uid, {"type": "relay", "text": text})
-        await query.message.reply_text(f"📤 Sent: {text}")
     elif data.startswith("m_"):
         model = data[2:]
-        if model in MODELS:
-            await send_cmd(uid, {"type": "model", "model": model})
-            await query.message.reply_text(f"🔄 Switching to {model}...")
+        await send_cmd(uid, {"type": "model", "model": model})
+        await query.message.reply_text(f"🔄 Switching to {model}...")
 
 
 async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -804,10 +1019,24 @@ async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     
     uid = str(update.effective_user.id)
     st = get_user_state(uid)
+    text = update.message.text
     
-    if st.get("locked"):
-        await update.message.reply_text("🔒 Locked")
-        return
+    # Handle mini keyboard buttons
+    if text == "📸 Status":
+        return await status_cmd(update, ctx)
+    elif text == "✅ Accept":
+        return await accept_cmd(update, ctx)
+    elif text == "❌ Reject":
+        return await reject_cmd(update, ctx)
+    elif text == "⬆️ Scroll Up":
+        ctx.args = ["up"]
+        return await scroll_cmd(update, ctx)
+    elif text == "⬇️ Scroll Down":
+        ctx.args = ["down"]
+        return await scroll_cmd(update, ctx)
+    elif text == "↩️ Undo":
+        return await undo_cmd(update, ctx)
+    
     if st.get("paused"):
         await update.message.reply_text("⏸️ Paused. /resume")
         return
@@ -815,17 +1044,17 @@ async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔴 Not connected\nID: `{uid}`", parse_mode=ParseMode.MARKDOWN)
         return
     
-    text = sanitize_input(update.message.text)
-    audit_logger.log(uid, "MESSAGE", text[:50])
+    text = sanitize_input(text)
+    undo_stack.push(uid, f"msg:{text[:20]}")
     
     msg = await update.message.reply_text("📤 Sending...")
     resp = await send_cmd(uid, {"type": "relay", "text": text})
     if resp and resp.get("success"):
-        keyboard = [[InlineKeyboardButton("📸 Screenshot", callback_data="q_ss")]]
-        try:
-            await msg.edit_text("✅ Sent!", reply_markup=InlineKeyboardMarkup(keyboard))
-        except:
-            pass
+        keyboard = [[
+            InlineKeyboardButton("📸 Screenshot", callback_data="q_ss"),
+            InlineKeyboardButton("✅ Accept", callback_data="q_accept"),
+        ]]
+        await msg.edit_text("✅ Sent! Waiting for AI response...", reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         await msg.edit_text("❌ Failed")
 
@@ -838,20 +1067,19 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔴 Not connected")
         return
     
-    msg = await update.message.reply_text("👁️ Processing photo...")
+    msg = await update.message.reply_text("👁️ Processing...")
     photo_file = await update.message.photo[-1].get_file()
     data = await photo_file.download_as_bytearray()
     b64_data = base64.b64encode(data).decode()
     
     resp = await send_cmd(uid, {"type": "photo", "data": b64_data})
     if resp and resp.get("success"):
-        await msg.edit_text("✅ Photo sent to Agent")
+        await msg.edit_text("✅ Photo sent to AI")
     else:
-        await msg.edit_text("❌ Failed to send photo")
+        await msg.edit_text("❌ Failed")
 
 
 async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Handle voice messages with Whisper transcription."""
     if not await check_rate_limit(update):
         return
     uid = str(update.effective_user.id)
@@ -859,30 +1087,16 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔴 Not connected")
         return
 
-    msg = await update.message.reply_text("🎙️ Processing voice...")
+    msg = await update.message.reply_text("🎙️ Processing...")
     voice_file = await update.message.voice.get_file()
     data = await voice_file.download_as_bytearray()
+    b64_data = base64.b64encode(data).decode()
     
-    # Try cloud transcription first
-    transcribed_text = await voice_service.transcribe(bytes(data), "ogg")
-    
-    if transcribed_text:
-        # Send transcribed text as command
-        audit_logger.log(uid, "VOICE", transcribed_text[:50])
-        resp = await send_cmd(uid, {"type": "relay", "text": transcribed_text})
-        if resp and resp.get("success"):
-            await msg.edit_text(f"✅ *Voice command:*\n\"{transcribed_text}\"", parse_mode=ParseMode.MARKDOWN)
-        else:
-            await msg.edit_text(f"❌ Failed to send: \"{transcribed_text}\"")
+    resp = await send_cmd(uid, {"type": "voice", "data": b64_data, "format": "ogg"})
+    if resp and resp.get("success"):
+        await msg.edit_text(f"✅ Voice: \"{resp.get('text', 'Sent')}\"")
     else:
-        # Fallback: send audio file to agent for local processing
-        b64_data = base64.b64encode(data).decode()
-        resp = await send_cmd(uid, {"type": "voice", "data": b64_data, "format": "ogg"})
-        if resp and resp.get("success"):
-            result_text = resp.get("text", "Audio sent")
-            await msg.edit_text(f"✅ Voice sent: \"{result_text}\"")
-        else:
-            await msg.edit_text("❌ Failed to process voice")
+        await msg.edit_text("❌ Failed")
 
 
 async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -905,9 +1119,9 @@ async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     
     resp = await send_cmd(uid, {"type": "file", "data": b64_data, "name": doc.file_name})
     if resp and resp.get("success"):
-        await msg.edit_text(f"✅ Saved to: {resp.get('path', 'disk')}")
+        await msg.edit_text(f"✅ Saved: {resp.get('path', 'disk')}")
     else:
-        await msg.edit_text("❌ Failed to send file")
+        await msg.edit_text("❌ Failed")
 
 
 # ============ Main ============
@@ -927,12 +1141,11 @@ async def run_bot():
     bot_application = ApplicationBuilder().token(config.BOT_TOKEN).build()
     
     handlers = [
-        ("start", start_cmd), ("status", status_cmd), ("scroll", scroll_cmd),
-        ("accept", accept_cmd), ("reject", reject_cmd), ("undo", undo_cmd),
-        ("cancel", cancel_cmd), ("key", key_cmd), ("quick", quick_cmd),
-        ("model", model_cmd), ("summary", summary_cmd), ("watchdog", watchdog_cmd),
-        ("pause", pause_cmd), ("resume", resume_cmd), ("sysinfo", sysinfo_cmd),
-        ("files", files_cmd),
+        ("start", start_cmd), ("status", status_cmd), ("stream", stream_cmd),
+        ("diff", diff_cmd), ("schedule", schedule_cmd), ("undo", undo_cmd),
+        ("scroll", scroll_cmd), ("accept", accept_cmd), ("reject", reject_cmd),
+        ("tts", tts_cmd), ("quick", quick_cmd), ("model", model_cmd),
+        ("watchdog", watchdog_cmd), ("pause", pause_cmd), ("resume", resume_cmd),
     ]
     for cmd, handler in handlers:
         bot_application.add_handler(CommandHandler(cmd, handler))
@@ -946,7 +1159,7 @@ async def run_bot():
     await bot_application.initialize()
     await bot_application.start()
     await bot_application.updater.start_polling()
-    logger.info("Bot running - v3.3.0 with Heartbeat, Queue, Whisper!")
+    logger.info("Bot v4.0 running - VIBECODER EDITION!")
     
     while True:
         await asyncio.sleep(1)
