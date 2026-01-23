@@ -86,7 +86,7 @@ def main() -> None:
     parser.add_argument("--refresh", action="store_true", help="Refresh expired token")
     parser.add_argument("--server", help="Custom server URL")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
-    parser.add_argument("--version", action="version", version="antigravity-remote 4.3.1")
+    parser.add_argument("--version", action="version", version="antigravity-remote 4.4.0")
     
     args = parser.parse_args()
     

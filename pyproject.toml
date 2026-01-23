@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "antigravity-remote"
-version = "4.3.1"
+version = "4.4.0"
 description = "The Vibecoder's Best Friend - Control your AI coding assistant from your phone"
 readme = "README.md"
 license = "MIT"
@@ -38,6 +38,7 @@ dependencies = [
     "httpx>=0.24.0",
     "Pillow>=10.0.0",
     "psutil>=5.9.0",
+    "pydantic>=2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -59,8 +60,12 @@ all = [
 ]
 dev = [
     "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
     "black>=23.0.0",
     "mypy>=1.0.0",
+    "httpx>=0.24.0",
 ]
 
 [project.scripts]
