@@ -240,7 +240,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Antigravity Remote v4.3", lifespan=lifespan)
     
     # Initialize routes with dependencies
-    init_api_routes(connected_clients, live_stream)
+    init_api_routes(connected_clients, live_stream, send_cmd)
     init_websocket(
         connected_clients,
         pending_responses,

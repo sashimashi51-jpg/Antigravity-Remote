@@ -19,14 +19,16 @@ router = APIRouter()
 # These will be injected by app.py
 connected_clients = None
 live_stream = None
+send_cmd = None
 stream_viewers = {}  # user_id -> list of viewer WebSockets
 
 
-def init_routes(clients_ref, live_stream_ref):
+def init_routes(clients_ref, live_stream_ref, send_cmd_func):
     """Initialize routes with shared state."""
-    global connected_clients, live_stream
+    global connected_clients, live_stream, send_cmd
     connected_clients = clients_ref
     live_stream = live_stream_ref
+    send_cmd = send_cmd_func
 
 
 @router.get("/")
@@ -276,9 +278,32 @@ async def stream_websocket(websocket: WebSocket, user_id: str):
             # Check for commands from viewer
             try:
                 data = await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
-                # Handle viewer commands (accept, reject, etc.)
-                logger.info(f"Viewer command: {data}")
+                cmd_msg = json.loads(data)
+                cmd_type = cmd_msg.get("command")
+                
+                if cmd_type and send_cmd:
+                    logger.info(f"🚀 Relaying viewer command: {cmd_type} for {user_id[-4:]}")
+                    
+                    # Convert browser command to agent command
+                    agent_cmd = None
+                    if cmd_type == "accept":
+                        agent_cmd = {"type": "accept"}
+                    elif cmd_type == "reject":
+                        agent_cmd = {"type": "reject"}
+                    elif cmd_type == "screenshot":
+                        agent_cmd = {"type": "screenshot", "quality": 80}
+                    elif cmd_type == "scroll_up":
+                        agent_cmd = {"type": "scroll", "direction": "up"}
+                    elif cmd_type == "scroll_down":
+                        agent_cmd = {"type": "scroll", "direction": "down"}
+                        
+                    if agent_cmd:
+                        # Send in background to not block stream
+                        asyncio.create_task(send_cmd(user_id, agent_cmd))
+                        
             except asyncio.TimeoutError:
+                pass
+            except json.JSONDecodeError:
                 pass
             
             await asyncio.sleep(0.1)  # ~10 FPS max polling
